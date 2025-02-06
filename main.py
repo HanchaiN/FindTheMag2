@@ -144,8 +144,7 @@ DEV_LOOP_RUNNING = False
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
-# Dictionary for places we query in format key=url, value=Tuple[nickname,regex].
-# Note they all must match group 2
+
 
 def resolve_url_database(url: str) -> str:
     """
