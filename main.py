@@ -26,7 +26,7 @@ try:
     from requests.auth import HTTPBasicAuth
     from typing import List, Union, Dict, Tuple, Set, Any
     import sys, signal
-    from grc_price_utils import get_grc_price_from_site
+    from grc_price_utils import get_grc_price_from_sites
 
     # This is needed for some async stuff
     import nest_asyncio
@@ -968,7 +968,7 @@ def get_grc_price(sample_text: str = None) -> Union[float, None]:
     Raises:
         Exception: An error occurred accessing an online GRC price source.
     """
-    price, table_message, url_messages, info_log_messages, error_log_messages = get_grc_price_from_site()
+    price, table_message, url_messages, info_log_messages, error_log_messages = get_grc_price_from_sites()
 
     for log_message in info_log_messages:
         log.info(log_message)

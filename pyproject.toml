@@ -25,6 +25,7 @@ urllib3 = "^2.2.3"
 xmltodict = "^0.14.2"
 zope-interface = "^7.2"
 nest-asyncio = "^1.6.0"
+beautifulsoup4 = "^4.13.3"
 
 
 [build-system]
