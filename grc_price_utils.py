@@ -1,5 +1,5 @@
 import random
-from typing import Union
+from typing import Union, List, Tuple
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,7 +21,7 @@ AGENTS = (
 
 GRC_PRICE_URLS = ("https://www.bybit.com/en/coin-price/gridcoin-research/", "https://coinstats.app/coins/gridcoin/", "https://marketcapof.com/crypto/gridcoin-research/")
 
-def parse_grc_price_soup(url: str, price_soup: str) -> tuple[Union[float, None], str, str]:
+def parse_grc_price_soup(url: str, price_soup: str) -> Tuple[Union[float, None], str, str]:
     float_price = None
     info_message = ""
     url_message = ""
@@ -73,7 +73,7 @@ def parse_grc_price_soup(url: str, price_soup: str) -> tuple[Union[float, None],
     return float_price, url_message, info_message
 
 
-def get_grc_price_from_sites() -> tuple[Union[float, None], str, list, list, list]:
+def get_grc_price_from_sites() -> Tuple[Union[float, None], str, List[str], List[str], List[str]]:
     headers = requests.utils.default_headers()
     headers["User-Agent"] = random.choice(AGENTS)
     found_prices = []
