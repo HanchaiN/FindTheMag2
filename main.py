@@ -26,6 +26,7 @@ try:
     from requests.auth import HTTPBasicAuth
     from typing import List, Union, Dict, Tuple, Set, Any
     import sys, signal
+    from grc_price_utils import get_grc_price_from_sites
 
     # This is needed for some async stuff
     import nest_asyncio
@@ -143,21 +144,6 @@ DEV_LOOP_RUNNING = False
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
-# Dictionary for places we query in format key=url, value=Tuple[nickname,regex].
-# Note they all must match group 2
-PRICE_URL_DICT: Dict[str, Tuple[str, Union[str, re.Pattern]]] = {
-    "https://finance.yahoo.com/quote/GRC-USD/": (
-        "yahoo.com",
-        r'(data-field="regularMarketPrice" data-trend="none" data-pricehint="\d" value=")(\d*\.\d*)',
-    ),
-    "https://www.coingecko.com/en/coins/gridcoin-research": (
-        "coingecko",
-        re.compile(
-            r'(data-coin-id="243" data-coin-symbol="grc" data-target="price.price">\$)(\d*\.\d*)(</span>)',
-            flags=re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-}
 
 
 def resolve_url_database(url: str) -> str:
@@ -190,7 +176,7 @@ try:
     from config import *
 except Exception as e:
     print("Error opening config.py, using defaults! Error is: {}".format(e))
-# Import addl user settings from user_config
+# Import additional user settings from user_config
 if os.path.isfile("user_config.py"):
     try:
         from user_config import *  # You can ignore an unresolved reference error here in pycharm since user is expected to create this file
@@ -982,48 +968,28 @@ def get_grc_price(sample_text: str = None) -> Union[float, None]:
     Raises:
         Exception: An error occurred accessing an online GRC price source.
     """
-    import requests as req
+    price, table_message, url_messages, info_log_messages, error_log_messages = get_grc_price_from_sites()
 
-    found_prices = []
-    headers = req.utils.default_headers()
-    headers.update(
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
-        }
-    )
-    for url, info in PRICE_URL_DICT.items():
-        regex = info[1]
-        name = info[0]
-        resp = ""
-        if sample_text:
-            resp = sample_text
-        else:
-            try:
-                resp = req.get(url, headers=headers).text
-            except Exception as e:
-                log.error("Error fetching stats from {}: {}".format(name, e))
-        regex_result = re.search(regex, resp)
-        if regex_result:
-            try:
-                answer = float(regex_result.group(2))
-            except Exception as e:
-                DATABASE["TABLE_STATUS"] = "Error getting info from {}".format(name)
-                print_and_log("Error getting info from {}".format(name), "ERROR")
-            else:
-                log.info("Found GRC price of {} from {}".format(answer, name))
-                found_prices.append(answer)
-        else:
-            DATABASE["TABLE_STATUS"] = "Error getting info from {}".format(name)
-            print_and_log("Error getting info from {}".format(name), "ERROR")
-    # Return average of all found prices
-    if len(found_prices) > 0:
-        DATABASE["TABLE_STATUS"] = "Found GRC price {}".format(
-            sum(found_prices) / len(found_prices)
-        )
-        return sum(found_prices) / len(found_prices)
-    else:
-        DATABASE["TABLE_STATUS"] = "Unable to find GRC price"
-        return None
+    for log_message in info_log_messages:
+        log.info(log_message)
+
+    for log_message in error_log_messages:
+        log.error(log_message)
+
+    if price:
+        DATABASE["TABLE_STATUS"] = table_message
+
+        for url_message in url_messages:
+            print_and_log(url_message, "ERROR")
+
+        return price
+
+    DATABASE["TABLE_STATUS"] = table_message
+
+    for url_message in url_messages:
+        print_and_log(url_message, "ERROR")
+
+    return DATABASE.get("GRCPRICE", 0)
 
 
 def get_approved_project_urls_web(query_result: str = None) -> Dict[str, str]:
@@ -2460,8 +2426,8 @@ def print_table(
     bottom_bar_2 = left_align("Info: {}".format(status), total_len=60, min_pad=1)
     bottom_bar_3 = (
         left_align(
-            "GRC Price: {:.4f}".format(DATABASE.get("GRCPRICE", 0.00000)),
-            total_len=17,
+            "GRC Price: {:.6f}".format(DATABASE.get("GRCPRICE", 0.00000)),
+            total_len=19,
             min_pad=1,
         )
         + "*"
