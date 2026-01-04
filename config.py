@@ -121,4 +121,6 @@ BOINC_IP = "127.0.0.1"  # defaults to '127.0.0.1' with quotes
 BOINC_USERNAME = None  # defaults to None without quotes
 BOINC_PASSWORD = None  # defaults to None, password to the BOINC rpc
 BOINC_PORT = 31416
+
+STAT_FILE = "stats.json"
 # fmt: on

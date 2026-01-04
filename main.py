@@ -55,6 +55,7 @@ BOINC_IP: str = "127.0.0.1"
 BOINC_PORT: int = 31416
 BOINC_USERNAME: Union[str, None] = None
 BOINC_PASSWORD: Union[str, None] = None
+STAT_FILE: str = "stats.json"
 # Minimum time in minutes before re-asking a project for work who previously said
 # they were out
 MIN_RECHECK_TIME: int = 30
@@ -585,7 +586,7 @@ def safe_exit(arg1, arg2) -> None:
 
     # Backup most recent database save then save database to json file
     log.debug("Saving database")
-    shutil.copy("stats.json", "stats.json.backup")
+    shutil.copy(STAT_FILE, "{}.backup".format(STAT_FILE))
     save_stats(DATABASE)
     # If BOINC control is not enabled, we can skip the rest of these steps
     if not CONTROL_BOINC:
@@ -3430,11 +3431,11 @@ def benchmark_check(
 def actual_save_stats(database: Any, path: str = None) -> None:
     """
     Save a JSON database file. Normally saves to given path.txt unless the path is "stats"
-    in which case it saves to stats.json
+    in which case it saves to STAT_FILE
     """
     if path:
         if path == "stats":
-            path = "stats.json"
+            path = STAT_FILE
     try:
         if not path:
             with open(path + ".txt", "w") as fp:
@@ -4500,16 +4501,16 @@ if __name__ == "__main__":
     shutdown_dev_client(quiet=True)
 
     # Load long-term stats
-    if os.path.exists("stats.json"):
+    if os.path.exists(STAT_FILE):
         try:
-            with open("stats.json") as json_file:
+            with open(STAT_FILE) as json_file:
                 DATABASE: Dict[str, Any] = json.load(json_file, object_hook=object_hook)
         except Exception as e:
-            if os.path.exists("stats.json.backup"):
+            if os.path.exists("{}.backup".format(STAT_FILE)):
                 print("Error opening stats file, trying backup...")
                 log.error("Error opening stats file, trying backup...")
                 try:
-                    with open("stats.json.backup") as json_file:
+                    with open("{}.backup".format(STAT_FILE)) as json_file:
                         DATABASE: Dict[str, Any] = json.load(
                             json_file, object_hook=object_hook
                         )
@@ -4521,7 +4522,7 @@ if __name__ == "__main__":
                     save_stats(DATABASE)
             else:
                 print_and_log("Error loading stats file. Making new one...", "ERROR")
-                shutil.copy("stats.json", "stats.json.corrupted")
+                shutil.copy(STAT_FILE, "{}.corrupted".format(STAT_FILE))
                 DATABASE = create_default_database()
                 save_stats(DATABASE)
     else:
