@@ -39,7 +39,7 @@ except Exception as e:
         "Error loading some required modules. Make sure you have installed the modules in requirements.txt as documented in the README"
     )
     print(str(e))
-    quit()
+    sys.exit(1)
 
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -192,7 +192,7 @@ for variable in dir(config):
             variable
         )
         print(error)
-        quit()
+        sys.exit(1)
 if os.path.exists("user_config.py"):
     for variable in dir(user_config):
         if variable.startswith("__"):
@@ -202,7 +202,7 @@ if os.path.exists("user_config.py"):
                 variable
             )
             print(error)
-            quit()
+            sys.exit(1)
 # Setup logging
 log = logging.getLogger()
 if LOG_LEVEL == "NONE":
@@ -589,7 +589,7 @@ def safe_exit(arg1, arg2) -> None:
     save_stats(DATABASE)
     # If BOINC control is not enabled, we can skip the rest of these steps
     if not CONTROL_BOINC:
-        quit()
+        sys.exit()
 
     new_loop = (
         asyncio.get_event_loop()
@@ -621,15 +621,11 @@ def safe_exit(arg1, arg2) -> None:
 
     # Restore original BOINC preferences
     if os.path.exists(override_dest_path):
-        print("Restoring original preferences...")
-        log.debug("Restoring original preferences...")
+        print_and_log("Restoring original preferences...", "DEBUG")
         try:
             shutil.copy(override_dest_path, override_path)
         except PermissionError as e:
-            print("Permission error restoring original BOINC preferences {}".format(e))
-            log.error(
-                "Permission error restoring original BOINC preferences {}".format(e)
-            )
+            print_and_log("Permission error restoring original BOINC preferences {}".format(e), "ERROR")
             print("Be sure you have permission to edit this file")
             print(
                 "Linux users try  'sudo usermod -aG boinc your_username_here' to fix this error".format(
@@ -643,8 +639,7 @@ def safe_exit(arg1, arg2) -> None:
                 "MacOS users: This is a known issue, if you find a good fix for it please let us know on Github!"
             )
         except Exception as e:
-            print("Error restoring original BOINC preferences {}".format(e))
-            log.error("Error restoring original BOINC preferences {}".format(e))
+            print_and_log("Error restoring original BOINC preferences {}".format(e), "ERROR")
             print("Be sure you have permission to edit this file")
             print(
                 "Linux users try  'sudo usermod -aG boinc your_username_here' to fix this error".format(
@@ -660,7 +655,7 @@ def safe_exit(arg1, arg2) -> None:
         loop.close()
     except Exception as e:
         log.error("Error closing an event loop: {}".format(e))
-    quit()
+    sys.exit()
 
 
 async def get_stats_helper(rpc_client: libs.pyboinc.rpc_client) -> list:
@@ -752,7 +747,7 @@ async def is_boinc_crunching(rpc_client: libs.pyboinc.rpc_client) -> bool:
             "Error checking if BOINC is crunching. If you continue to see this error, make sure BOINC is running"
         )
         log.error(
-            "Error checking if BOINC is crunching (in is_boinc_crunching: ".format(e)
+            "Error checking if BOINC is crunching (in is_boinc_crunching: {}".format(e)
         )
         return False
 
@@ -825,8 +820,7 @@ def temp_check() -> bool:
             print("Error parsing temp {} {}".format(match, e))
             return True
     else:
-        print("No temps found!")
-        log.error("No temps found!")
+        print_and_log("No temps found!", "ERROR")
         return True
     return True
 
@@ -1233,19 +1227,13 @@ def get_gridcoin_config_parameters(gridcoin_dir: str) -> Dict[str, str]:
                     return_dict[key] = value
     for key, value in dupes.items():
         if len(value) > 1:
-            print(
+            print_and_log(
                 "Warning: multiple values found for "
                 + key
                 + " in gridcoin config file at "
                 + os.path.join(gridcoin_dir, "gridcoinresearch.conf")
-                + " using the first one we found"
-            )
-            log.warning(
-                "Warning: multiple values found for "
-                + key
-                + " in gridcoin config file at "
-                + os.path.join(gridcoin_dir, "gridcoinresearch.conf")
-                + " using the first one we found"
+                + " using the first one we found",
+                "WARNING"
             )
 
     return return_dict
@@ -1361,19 +1349,14 @@ def stat_file_to_list(
                     log_entry,
                 )
             except Exception as e:
-                print(
+                print_and_log(
                     "Error reading BOINC job log at "
                     + stat_file_abs_path
-                    + " maybe it's corrupt? Line: error: ".format(log_entry, e)
-                )
-                log.error(
-                    "Error reading BOINC job log at "
-                    + stat_file_abs_path
-                    + " maybe it's corrupt? Line: error: ".format(log_entry, e)
+                    + " maybe it's corrupt? Line: {} error: {}".format(log_entry, e),
+                    "ERROR"
                 )
             if not match:
-                print("Encountered log entry in unknown format: " + log_entry)
-                log.error("Encountered log entry in unknown format: " + log_entry)
+                print_and_log("Encountered log entry in unknown format: " + log_entry, "ERROR")
                 continue
             stats = dict()
             stats["STARTTIME"] = match.group(1)
@@ -1386,17 +1369,12 @@ def stat_file_to_list(
             stats_list.append(stats)
         return stats_list
     except Exception as e:
-        print(
+        print_and_log(
             "Error reading BOINC job log at "
             + stat_file_abs_path
             + " maybe it's corrupt? "
-            + str(e)
-        )
-        log.error(
-            "Error reading BOINC job log at "
-            + stat_file_abs_path
-            + " maybe it's corrupt? "
-            + str(e)
+            + str(e),
+            "ERROR"
         )
         return []
 
@@ -1455,11 +1433,9 @@ async def run_rpc_command(
             response = await rpc_client._request(req)
             parsed = parse_generic(response)
             if not str(parsed):
-                print(
-                    "Warning: Error w RPC command {}: {}".format(full_command, parsed)
-                )
-                log.error(
-                    "Warning: Error w RPC command {}: {}".format(full_command, parsed)
+                print_and_log(
+                    "Warning: Error w RPC command {}: {}".format(full_command, parsed),
+                    "ERROR"
                 )
                 continue
         except Exception as e:
@@ -2503,8 +2479,7 @@ def generate_stats(
         mag_ratios = MAG_RATIOS
     weak_stats = []
     if not quiet:
-        print("Gathering project stats...")
-        log.info("Gathering project stats..")
+        print_and_log("Gathering project stats...", "INFO")
     combined_stats = config_files_to_stats(BOINC_DATA_DIR)
     if not quiet:
         print_and_log("Calculating project weights...", "INFO")
@@ -2553,11 +2528,9 @@ def generate_stats(
         combined_stats, ignored_projects, quiet=quiet
     )
     if len(most_efficient_projects) == 0:
-        print(
-            "No projects have enough completed tasks to determine which is the most efficient. Assigning all projects 1"
-        )
-        log.warning(
-            "No projects have enough completed tasks to determine which is the most efficient. Assigning all projects 1"
+        print_and_log(
+            "No projects have enough completed tasks to determine which is the most efficient. Assigning all projects 1",
+            "WARNING"
         )
         total_preferred_weight = (
             1000 - (len(approved_project_urls)) + len(preferred_projects)
@@ -2614,23 +2587,15 @@ def generate_stats(
         per_efficient_project_dev = 1000 / len(most_efficient_projects)
     if total_mining_weight_remaining > 0:
         if not quiet:
-            print(
+            print_and_log(
                 "Assigning "
                 + str(total_mining_weight_remaining)
                 + " weight to "
                 + str(len(most_efficient_projects))
                 + " mining projects which means "
                 + str(per_efficient_project)
-                + " per project "
-            )
-            log.info(
-                "Assigning "
-                + str(total_mining_weight_remaining)
-                + " weight to "
-                + str(len(most_efficient_projects))
-                + " mining projects which means "
-                + str(per_efficient_project)
-                + " per project "
+                + " per project ",
+                "INFO"
             )
     for project_url in most_efficient_projects:
         if project_url not in final_project_weights:
@@ -3136,9 +3101,9 @@ async def prefs_check(
             log.error(
                 'If you have configured BOINC to be able to use >=10GB and still get this message, it is because you are low on disk space and BOINC is responding to settings such as "don\'t use greater than X% of space" or "leave x% free"'
             )
-            print("Press enter to quit")
-            input()
-            quit()
+            if not SCRIPTED_RUN:
+                input("Press enter to quit")
+            sys.exit(1)
         else:
             return_val = False
     net_start_hour = int(float(global_prefs["net_start_hour"])) + int(
@@ -3154,9 +3119,9 @@ async def prefs_check(
                 "You have BOINC configured to only access the network at certain times, this tool requires constant "
                 "internet availability."
             )
-            print("Press enter to quit")
-            input()
-            quit()
+            if not SCRIPTED_RUN:
+                input("Press enter to quit")
+            sys.exit(1)
         else:
             return_val = False
     return return_val
@@ -3480,7 +3445,7 @@ def actual_save_stats(database: Any, path: str = None) -> None:
                 json.dump(database, fp, default=json_default)
                 SAVE_STATS_DB[path] = database
     finally:
-        return
+        pass
 
 
 def save_stats(database: Any, path: str = None) -> None:
@@ -4509,15 +4474,19 @@ if __name__ == "__main__":
                 platform.python_version()
             )
         )
-        input("Press enter to exit")
-        quit()
+        if not SCRIPTED_RUN:
+            input("Press enter to exit")
+        sys.exit(1)
     elif python_major == 3 and python_minor < 8:
         print(
             "Error: This program requires python 3.8 or higher to run, you are running it as Python {}".format(
                 platform.python_version()
             )
         )
-        input("Some things may not work as expected. Press enter to continue")
+        if not SCRIPTED_RUN:
+            input("Some things may not work as expected. Press enter to continue")
+        else:
+            print("Some things may not work as expected. Press enter to continue")
     del python_minor
     del python_major
     log.debug("Python version {}".format(platform.python_version()))
@@ -4603,15 +4572,17 @@ if __name__ == "__main__":
             "BOINC data dir does not appear to exist. If you have it in a non-standard location, please edit config.py so we know where to look",
             "ERROR",
         )
-        input("Press enter to exit")
-        quit()
+        if not SCRIPTED_RUN:
+            input("Press enter to exit")
+        sys.exit(1)
     log.info("Guessing Gridcoin data dir is " + str(GRIDCOIN_DATA_DIR))
     if not os.path.isdir(GRIDCOIN_DATA_DIR):
         print_and_log(
             "Gridcoin data dir does not appear to exist. If you have it in a non-standard location, please edit config.py so we know where to look",
             "ERROR",
         )
-        input("Press enter to continue or CTRL+C to quit")
+        if not SCRIPTED_RUN:
+            input("Press enter to continue or CTRL+C to quit")
         wallet_running = False
 
     try:
@@ -4660,8 +4631,9 @@ if __name__ == "__main__":
             "Warning: The weights of your preferred projects do not add up to 100! Quitting.",
             "ERROR",
         )
-        input("Press enter to exit")
-        quit()
+        if not SCRIPTED_RUN:
+            input("Press enter to exit")
+        sys.exit(1)
 
     # Establish connections to BOINC and Gridcoin clients, get basic info
     boinc_client = None
@@ -4675,8 +4647,9 @@ if __name__ == "__main__":
             + str(e),
             "ERROR",
         )
-        input("Press enter to exit")
-        quit()
+        if not SCRIPTED_RUN:
+            input("Press enter to exit")
+        sys.exit(1)
     if wallet_running:
         try:
             gridcoin_conf = get_gridcoin_config_parameters(GRIDCOIN_DATA_DIR)
@@ -4714,50 +4687,51 @@ if __name__ == "__main__":
             print(
                 "RPC commands enable us to talk to the Gridcoin client and get information about project magnitude ratios"
             )
-            print(
-                "Would you like us to automatically configure your Gridcoin client to accept RPC commands?"
-            )
-            print("It will be configured to only accept commands from your machine.")
-            print(
-                "If you do not enable this, this script can only update its information about project magnitudes once a day through an external website"
-            )
-            print("This can cause inefficient crunching and is not advised")
-            print('Please answer "Y" or "N" without quotes. Then press the enter key')
-            answer = input("")
-            log.debug("User input: " + answer)
-            while answer not in ["Y", "N", "y", "n"]:
-                print("Error: Y or N not entered. Try again please :)")
-                answer = input("")
-            if answer == "N" or answer == "n":
-                print("Ok, we won't")
-            elif answer == "Y" or answer == "y":
-                with open(
-                    os.path.join(GRIDCOIN_DATA_DIR, "gridcoinresearch.conf"), "a"
-                ) as myfile:
-                    from random import choice
-                    from string import ascii_uppercase
-                    from string import ascii_lowercase
-                    from string import digits
-
-                    rpc_user = "".join(choice(ascii_uppercase) for i in range(8))
-                    gridcoin_rpc_password = "".join(
-                        choice(ascii_uppercase + ascii_lowercase + digits)
-                        for i in range(12)
-                    )
-                    rpc_port = 9876
-                    print("Your RPC username is: " + rpc_user)
-                    print("Your RPC password is: " + gridcoin_rpc_password)
-                    print("You don't need to remember these.")
-                    print("Modifying config file...")
-                    myfile.write("rpcport=9876\n")
-                    myfile.write("server=1\n")
-                    myfile.write("rpcuser=" + rpc_user + "\n")
-                    myfile.write("rpcpassword=" + gridcoin_rpc_password + "\n")
+            if not SCRIPTED_RUN:
                 print(
-                    "Alright, we've modified the config file. Please restart the gridcoin wallet."
+                    "Would you like us to automatically configure your Gridcoin client to accept RPC commands?"
                 )
-                print("Once it's loaded and --fully-- synced, press enter to continue")
-                input("")
+                print("It will be configured to only accept commands from your machine.")
+                print(
+                    "If you do not enable this, this script can only update its information about project magnitudes once a day through an external website"
+                )
+                print("This can cause inefficient crunching and is not advised")
+                print('Please answer "Y" or "N" without quotes. Then press the enter key')
+                answer = input("")
+                log.debug("User input: " + answer)
+                while answer not in ["Y", "N", "y", "n"]:
+                    print("Error: Y or N not entered. Try again please :)")
+                    answer = input("")
+                if answer == "N" or answer == "n":
+                    print("Ok, we won't")
+                elif answer == "Y" or answer == "y":
+                    with open(
+                        os.path.join(GRIDCOIN_DATA_DIR, "gridcoinresearch.conf"), "a"
+                    ) as myfile:
+                        from random import choice
+                        from string import ascii_uppercase
+                        from string import ascii_lowercase
+                        from string import digits
+
+                        rpc_user = "".join(choice(ascii_uppercase) for i in range(8))
+                        gridcoin_rpc_password = "".join(
+                            choice(ascii_uppercase + ascii_lowercase + digits)
+                            for i in range(12)
+                        )
+                        rpc_port = 9876
+                        print("Your RPC username is: " + rpc_user)
+                        print("Your RPC password is: " + gridcoin_rpc_password)
+                        print("You don't need to remember these.")
+                        print("Modifying config file...")
+                        myfile.write("rpcport=9876\n")
+                        myfile.write("server=1\n")
+                        myfile.write("rpcuser=" + rpc_user + "\n")
+                        myfile.write("rpcpassword=" + gridcoin_rpc_password + "\n")
+                    print(
+                        "Alright, we've modified the config file. Please restart the gridcoin wallet."
+                    )
+                    print("Once it's loaded and --fully-- synced, press enter to continue")
+                    input("")
 
     # Get project list from BOINC
     rpc_client = None
@@ -4767,10 +4741,10 @@ if __name__ == "__main__":
         )  # Setup BOINC RPC connection
     except Exception as e:
         print_and_log("Error: Unable to connect to BOINC client, quitting now", "ERROR")
-        quit()
+        sys.exit(1)
     if not rpc_client:
         print_and_log("Error: Unable to connect to BOINC client, quitting now", "ERROR")
-        quit()
+        sys.exit(1)
     # Get project list from BOINC client directly. This is needed for
     # correct capitalization
     temp_project_set, temp_project_names = loop.run_until_complete(
@@ -4780,7 +4754,7 @@ if __name__ == "__main__":
         print_and_log(
             "Error connecting to BOINC client, unable to get project list.", "ERROR"
         )
-        quit()
+        sys.exit(1)
     ATTACHED_PROJECT_SET.update(temp_project_set)
     combine_dicts(BOINC_PROJECT_NAMES, temp_project_names)
     try:
@@ -4843,8 +4817,9 @@ if __name__ == "__main__":
                 + str(e),
                 "ERROR",
             )
-            input("Press enter to exit")
-            quit()
+            if not SCRIPTED_RUN:
+                input("Press enter to exit")
+            sys.exit(1)
     else:
         MAG_RATIO_SOURCE = "WALLET"
         # Check sidestakes, prompt user to enable them if they don't exist
@@ -4931,7 +4906,7 @@ if __name__ == "__main__":
             "This also means 100% of the crunching time on this machine will be under your account, no need to crunch for developer"
         )
         print(
-            """
+            r"""
 ---             ,--,
 ----      _ ___/ /\|
 -----    ;( )__, )
@@ -4946,7 +4921,7 @@ if __name__ == "__main__":
         print(developer_address)
     if not CONTROL_BOINC and not SCRIPTED_RUN:
         input("Press enter key or CTRL+C to quit")
-        quit()
+        sys.exit()
     else:
         if not SCRIPTED_RUN:
             print("Press enter key to start controlling BOINC. Press Ctrl+C to quit")
@@ -4958,7 +4933,7 @@ if __name__ == "__main__":
             'Sidestaking must be setup for BOINC control on OS X as "crunch for dev" is not an option. Re-run the script to set this up.',
             "ERROR",
         )
-        quit()
+        sys.exit(1)
 
     # Backup user preferences.
     try:
@@ -4984,15 +4959,16 @@ if __name__ == "__main__":
         print(
             "Note that you will need to restart your computer after changing your group permissions"
         )
-        answer = input("Press enter to quit")
-        quit()
+        if not SCRIPTED_RUN:
+            answer = input("Press enter to quit")
+        sys.exit(1)
     try:
         loop.run_until_complete(prefs_check(rpc_client, testing=TESTING))
     except Exception as e:
         print_and_log(
             "Error connecting to BOINC for prefs_check. Is BOINC running?", "ERROR"
         )
-        quit()
+        sys.exit(1)
     # NNT all projects
     nnt_response = loop.run_until_complete(nnt_all_projects(rpc_client))
     # Abort unstarted tasks if the user requested it
