@@ -98,6 +98,7 @@ LOOKBACK_PERIOD = 30  # Number of days to look back to calculate credit -> MAG r
 ABORT_UNSTARTED_TASKS = False  # when we start controlling BOINC, should we abort unstarted tasks? Default is False, it's nicer to projects this way.
 BOINC_DATA_DIR = None  # Example: '/var/lib/boinc-client' or 'C:\\ProgramData\\BOINC\\'. Only needed if in a non-standard location, otherwise None.
 GRIDCOIN_DATA_DIR = None  # Example: '/home/user/.GridcoinResearch' or 'C:\\Users\\username\\AppData\\Roaming\\GridcoinResearch\\'. Only needed if in a non-standard location, otherwise None
+STRICT_GRIDCOIN = False
 RECALCULATE_STATS_INTERVAL = 60  # Interval in minutes to re-calculate stats. Default: 60
 PRICE_CHECK_INTERVAL = 1440  # how often to check GRC price in minutes, minimum delay of 60 minutes between checks. Default is 1440 (24 hrs)
 LOG_LEVEL = "WARNING"  # Options are: 'DEBUG','INFO','WARNING','ERROR','NONE', default is 'WARNING'

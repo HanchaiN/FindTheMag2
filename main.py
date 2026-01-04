@@ -110,6 +110,7 @@ DATABASE[
 ] = ""  # Info status printed in table, must be reset at script start
 SCRIPTED_RUN: bool = False
 SKIP_TABLE_UPDATES: bool = False
+STRICT_GRIDCOIN: bool = False
 HOST_COST_PER_HOUR = (HOST_POWER_USAGE / 1000) * LOCAL_KWH
 LAST_KNOWN_CPU_MODE = None
 LAST_KNOWN_GPU_MODE = None
@@ -4802,6 +4803,10 @@ if __name__ == "__main__":
             )
         )
         wallet_running = False
+        if STRICT_GRIDCOIN:
+            if not SCRIPTED_RUN:
+                print("Press enter to exit")
+            sys.exit(1)
         try:
             project_resolver_dict = get_approved_project_urls_web()
             APPROVED_PROJECT_URLS = resolve_url_list_to_database(
