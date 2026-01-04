@@ -569,6 +569,26 @@ def shutdown_dev_client(quiet: bool = False) -> None:
     except Exception as e:
         log.error("Error shutting down dev client {}".format(e))
 
+async def undo_nnt_all_projects(rpc_client: libs.pyboinc.rpc_client) -> None:
+    """
+    Undo NNT all projects, return when done or if encountered errors
+    @param rpc_client:
+    @return:
+    """
+    try:
+        project_status_reply = await rpc_client.get_project_status()
+        found_projects = []
+        for project in project_status_reply:
+            found_projects.append(project.master_url)
+        for project in found_projects:
+            req = ET.Element("project_allowmorework")
+            a = ET.SubElement(req, "project_url")
+            a.text = project
+            response = await rpc_client._request(req)
+            parsed = parse_generic(response)  # Returns True if successful
+    except Exception as e:
+        log.error("Error Un-NNTing all projects: {}".format(e))
+
 
 def safe_exit(arg1, arg2) -> None:
     """Safely exit Find The Mag.
@@ -653,6 +673,18 @@ def safe_exit(arg1, arg2) -> None:
             )
         else:
             os.remove(override_dest_path)
+    
+    try:
+        rpc_client = new_loop.run_until_complete(
+            setup_connection(BOINC_IP, BOINC_PASSWORD, port=BOINC_PORT)
+        )  # Setup dev BOINC RPC connection
+        authorize_response = new_loop.run_until_complete(
+            rpc_client.authorize(BOINC_PASSWORD)
+        )  # Authorize dev RPC connection
+        new_loop.run_until_complete(undo_nnt_all_projects(rpc_client))
+    except Exception as e:
+        log.error("Error undoing NNT in main client {}".format(e))
+    
     try:
         loop.close()
     except Exception as e:
@@ -4463,6 +4495,45 @@ def create_default_database() -> Dict[str, Any]:
     DATABASE["TABLE_SLEEP_REASON"] = ""
     return DATABASE
 
+class GracefulInterruptHandler(object):
+    
+    def __init__(self, sig=signal.SIGINT, handler=lambda _, __: None):
+        try:
+            self.sig = list(sig)
+        except TypeError:
+            self.sig = [sig]
+        self.handler = handler
+        
+    def __enter__(self):
+        self.released = False
+        
+        self.original_handlers = {
+            sig: signal.getsignal(sig)
+            for sig in self.sig
+        }
+        
+        def handler(signum, frame):
+            self.handler(signum, frame)
+        
+        for sig in self.sig:
+            signal.signal(sig, handler)
+        
+        return self
+        
+    def __exit__(self, type, value, tb):
+        self.release()
+        
+    def release(self):
+        
+        if self.released:
+            return False
+
+        for sig, original_handler in self.original_handlers.items():
+            signal.signal(sig, original_handler)
+        
+        self.released = True
+        
+        return True
 
 if __name__ == "__main__":
     wallet_running = True  # Switches to false if we have issues connecting
@@ -4539,455 +4610,453 @@ if __name__ == "__main__":
     if "DEVTIMETOTAL" not in DATABASE:
         DATABASE["DEVTIMETOTAL"] = 0
 
-    signal.signal(
-        signal.SIGINT, safe_exit
-    )  # Capture ctrl+c from client to exit gracefully
-    update_check()  # Check for updates to FTM
-    COMBINED_STATS = {}
-    APPROVED_PROJECT_URLS = []
-    # COMBINED_STATS has format:
-    #    COMBINED_STATS_EXAMPLE = {
-    #        'HTTP://PROJECT.COM/PROJECT': {
-    #            'COMPILED_STATS': {
-    #                'AVGWALLTIME': 30.01, 'AVGCPUTIME': 10.02, 'TOTALTASKS': 51, 'TOTALWALLTIME': 223311.34,
-    #                'AVGCREDITPERHOUR': 31.2, 'XDAYWALLTIME': 30, 'AVGCREDITPERTASK': 32.12, 'AVGMAGPERHOUR': 32.1, 'TOTALCPUTIME':300010.10},
-    #            'CREDIT_HISTORY': {
-    #                '11-29-21': {'CREDITAWARDED':100.54},
-    #                '11-28-21': {'CREDITAWARDED':100.21},
-    #            },
-    #            'WU_HISTORY': {
-    #                '07-31-2021':{'STARTTIME': '1627765997', 'ESTTIME': '6128.136145', 'CPUTIME': '3621.724000',
-    #                 'ESTIMATEDFLOPS': '30000000000000', 'TASKNAME': 'wu_sf3_DS-16x271-9_Grp218448of1000000_0',
-    #                 'WALLTIME': '3643.133927', 'EXITCODE': '0'},
-    #                '07-29-2021': {'STARTTIME': '1627765996', 'ESTTIME': '6128.136145', 'CPUTIME': '3621.724000',
-    #                               'ESTIMATEDFLOPS': '30000000000000',
-    #                               'TASKNAME': 'wu_sf3_DS-16x271-9_Grp218448of1000000_0',
-    #                               'WALLTIME': '3643.133927', 'EXITCODE': '0'},
-    #            }
-    #        },
-    #    }
+    with GracefulInterruptHandler([signal.SIGINT, signal.SIGTERM], safe_exit) as h:  # Capture ctrl+c from client to exit gracefully
+        update_check()  # Check for updates to FTM
+        COMBINED_STATS = {}
+        APPROVED_PROJECT_URLS = []
+        # COMBINED_STATS has format:
+        #    COMBINED_STATS_EXAMPLE = {
+        #        'HTTP://PROJECT.COM/PROJECT': {
+        #            'COMPILED_STATS': {
+        #                'AVGWALLTIME': 30.01, 'AVGCPUTIME': 10.02, 'TOTALTASKS': 51, 'TOTALWALLTIME': 223311.34,
+        #                'AVGCREDITPERHOUR': 31.2, 'XDAYWALLTIME': 30, 'AVGCREDITPERTASK': 32.12, 'AVGMAGPERHOUR': 32.1, 'TOTALCPUTIME':300010.10},
+        #            'CREDIT_HISTORY': {
+        #                '11-29-21': {'CREDITAWARDED':100.54},
+        #                '11-28-21': {'CREDITAWARDED':100.21},
+        #            },
+        #            'WU_HISTORY': {
+        #                '07-31-2021':{'STARTTIME': '1627765997', 'ESTTIME': '6128.136145', 'CPUTIME': '3621.724000',
+        #                 'ESTIMATEDFLOPS': '30000000000000', 'TASKNAME': 'wu_sf3_DS-16x271-9_Grp218448of1000000_0',
+        #                 'WALLTIME': '3643.133927', 'EXITCODE': '0'},
+        #                '07-29-2021': {'STARTTIME': '1627765996', 'ESTTIME': '6128.136145', 'CPUTIME': '3621.724000',
+        #                               'ESTIMATEDFLOPS': '30000000000000',
+        #                               'TASKNAME': 'wu_sf3_DS-16x271-9_Grp218448of1000000_0',
+        #                               'WALLTIME': '3643.133927', 'EXITCODE': '0'},
+        #            }
+        #        },
+        #    }
 
-    # Check that directories exist
-    log.info("Guessing BOINC data dir is " + str(BOINC_DATA_DIR))
-    if not os.path.isdir(BOINC_DATA_DIR):
-        print_and_log(
-            "BOINC data dir does not appear to exist. If you have it in a non-standard location, please edit config.py so we know where to look",
-            "ERROR",
-        )
-        if not SCRIPTED_RUN:
-            input("Press enter to exit")
-        sys.exit(1)
-    log.info("Guessing Gridcoin data dir is " + str(GRIDCOIN_DATA_DIR))
-    if not os.path.isdir(GRIDCOIN_DATA_DIR):
-        print_and_log(
-            "Gridcoin data dir does not appear to exist. If you have it in a non-standard location, please edit config.py so we know where to look",
-            "ERROR",
-        )
-        if not SCRIPTED_RUN:
-            input("Press enter to continue or CTRL+C to quit")
-        wallet_running = False
-
-    try:
-        os.access(override_path, os.W_OK)
-    except Exception as e:
-        print_and_log(
-            "This program does not have write access to your BOINC config file, meaning it can't reset settings back to your original ones upon close",
-            "ERROR",
-        )
-        print_and_log(
-            "Linux users try 'sudo chown your_username {}' to fix this error".format(
-                override_path
-            ),
-            "INFO",
-        )
-        if not SCRIPTED_RUN:
-            input("Press enter to continue")
-
-    # Auto-detect password for BOINC RPC if it exists and user didn't know
-    # BOINC on Windows automatically generates an RPC password
-    auth_location = os.path.join(BOINC_DATA_DIR, "gui_rpc_auth.cfg")
-    if not BOINC_PASSWORD:
-        try:
-            with open(auth_location, "r") as file:
-                data = file.read().rstrip()
-                if data != "":
-                    BOINC_PASSWORD = data
-        except Exception as e:
-            # This error can generally be disregarded on Linux/OSX
-            if "WINDOWS" in FOUND_PLATFORM.upper():
-                print("Error reading boinc RPC file at {}: {}".format(auth_location, e))
-                log.error(
-                    "Error reading boinc RPC file at {}: {}".format(auth_location, e)
-                )
-            else:
-                log.debug(
-                    "Error reading boinc RPC file at {}: {}".format(auth_location, e)
-                )
-
-    # Check that project weights make sense
-    total_found_values = 0
-    for url, found_value in PREFERRED_PROJECTS.items():
-        total_found_values += found_value
-    if total_found_values != 100 and len(PREFERRED_PROJECTS) > 0:
-        print_and_log(
-            "Warning: The weights of your preferred projects do not add up to 100! Quitting.",
-            "ERROR",
-        )
-        if not SCRIPTED_RUN:
-            input("Press enter to exit")
-        sys.exit(1)
-
-    # Establish connections to BOINC and Gridcoin clients, get basic info
-    boinc_client = None
-    grc_client = None
-    gridcoin_conf = None
-    try:
-        boinc_client = BoincClientConnection(config_dir=BOINC_DATA_DIR)
-    except Exception as e:
-        print_and_log(
-            "Unable to open BOINC data directory. You may need to specify location in config. Error "
-            + str(e),
-            "ERROR",
-        )
-        if not SCRIPTED_RUN:
-            input("Press enter to exit")
-        sys.exit(1)
-    if wallet_running:
-        try:
-            gridcoin_conf = get_gridcoin_config_parameters(GRIDCOIN_DATA_DIR)
-        except Exception as e:
-            print(
-                "Error parsing gridcoin config file in directory: "
-                + GRIDCOIN_DATA_DIR
-                + " Error: "
-                + str(e)
-            )
-            log.error(
-                "Error parsing gridcoin config file in directory: "
-                + GRIDCOIN_DATA_DIR
-                + " Error: "
-                + str(e)
-            )
-            wallet_running = False
-            rpc_user = None
-            gridcoin_rpc_password = None
-            rpc_port = None
-        else:
-            # Set Gridcoin login parameters for use later
-            rpc_user = gridcoin_conf.get("rpcuser")
-            gridcoin_rpc_password = gridcoin_conf.get("rpcpassword")
-            rpc_port = gridcoin_conf.get("rpcport")
-        if not rpc_user or not gridcoin_rpc_password or not rpc_port:
-            print(
-                "Error: Gridcoin wallet is not configured to accept RPC commands based on config file from "
-                + str(GRIDCOIN_DATA_DIR)
-            )
-            log.error(
-                "Error: Gridcoin wallet is not configured to accept RPC commands based on config file from "
-                + str(GRIDCOIN_DATA_DIR)
-            )
-            print(
-                "RPC commands enable us to talk to the Gridcoin client and get information about project magnitude ratios"
+        # Check that directories exist
+        log.info("Guessing BOINC data dir is " + str(BOINC_DATA_DIR))
+        if not os.path.isdir(BOINC_DATA_DIR):
+            print_and_log(
+                "BOINC data dir does not appear to exist. If you have it in a non-standard location, please edit config.py so we know where to look",
+                "ERROR",
             )
             if not SCRIPTED_RUN:
-                print(
-                    "Would you like us to automatically configure your Gridcoin client to accept RPC commands?"
-                )
-                print("It will be configured to only accept commands from your machine.")
-                print(
-                    "If you do not enable this, this script can only update its information about project magnitudes once a day through an external website"
-                )
-                print("This can cause inefficient crunching and is not advised")
-                print('Please answer "Y" or "N" without quotes. Then press the enter key')
-                answer = input("")
-                log.debug("User input: " + answer)
-                while answer not in ["Y", "N", "y", "n"]:
-                    print("Error: Y or N not entered. Try again please :)")
-                    answer = input("")
-                if answer == "N" or answer == "n":
-                    print("Ok, we won't")
-                elif answer == "Y" or answer == "y":
-                    with open(
-                        os.path.join(GRIDCOIN_DATA_DIR, "gridcoinresearch.conf"), "a"
-                    ) as myfile:
-                        from random import choice
-                        from string import ascii_uppercase
-                        from string import ascii_lowercase
-                        from string import digits
-
-                        rpc_user = "".join(choice(ascii_uppercase) for i in range(8))
-                        gridcoin_rpc_password = "".join(
-                            choice(ascii_uppercase + ascii_lowercase + digits)
-                            for i in range(12)
-                        )
-                        rpc_port = 9876
-                        print("Your RPC username is: " + rpc_user)
-                        print("Your RPC password is: " + gridcoin_rpc_password)
-                        print("You don't need to remember these.")
-                        print("Modifying config file...")
-                        myfile.write("rpcport=9876\n")
-                        myfile.write("server=1\n")
-                        myfile.write("rpcuser=" + rpc_user + "\n")
-                        myfile.write("rpcpassword=" + gridcoin_rpc_password + "\n")
-                    print(
-                        "Alright, we've modified the config file. Please restart the gridcoin wallet."
-                    )
-                    print("Once it's loaded and --fully-- synced, press enter to continue")
-                    input("")
-
-    # Get project list from BOINC
-    rpc_client = None
-    try:
-        rpc_client = loop.run_until_complete(
-            setup_connection(BOINC_IP, BOINC_PASSWORD, BOINC_PORT)
-        )  # Setup BOINC RPC connection
-    except Exception as e:
-        print_and_log("Error: Unable to connect to BOINC client, quitting now", "ERROR")
-        sys.exit(1)
-    if not rpc_client:
-        print_and_log("Error: Unable to connect to BOINC client, quitting now", "ERROR")
-        sys.exit(1)
-    # Get project list from BOINC client directly. This is needed for
-    # correct capitalization
-    temp_project_set, temp_project_names = loop.run_until_complete(
-        get_attached_projects(rpc_client)
-    )
-    if not temp_project_set or not temp_project_names:
-        print_and_log(
-            "Error connecting to BOINC client, unable to get project list.", "ERROR"
-        )
-        sys.exit(1)
-    ATTACHED_PROJECT_SET.update(temp_project_set)
-    combine_dicts(BOINC_PROJECT_NAMES, temp_project_names)
-    try:
-        ALL_BOINC_PROJECTS = loop.run_until_complete(get_all_projects(rpc_client))
-    except Exception as e:
-        print("Error communicating with BOINC client, exiting")
-        safe_exit(None, None)
-
-    # Get project list from Gridcoin wallet and/or gridcoinstats, check sidestakes
-    foundation_address = "bc3NA8e8E3EoTL1qhRmeprbjWcmuoZ26A2"
-    developer_address = "RzUgcntbFm8PeSJpauk6a44qbtu92dpw3K"
-    try:
-        grc_client = GridcoinClientConnection(
-            rpc_user=rpc_user, rpc_port=rpc_port, rpc_password=gridcoin_rpc_password
-        )
-        # Test if the client is connectable
-        source_urls = grc_client.get_approved_project_urls()
-        wait_till_synced(grc_client)
-        source_urls = grc_client.get_approved_project_urls()
-        log.debug("Got source_urls from wallet: {}".format(source_urls))
-        APPROVED_PROJECT_URLS = resolve_url_list_to_database(source_urls)
-        log.debug("Got APPROVED from wallet: {}".format(APPROVED_PROJECT_URLS))
-        MAG_RATIOS = get_project_mag_ratios(grc_client, LOOKBACK_PERIOD)
-        DATABASE["MAGLASTCHECKED"] = datetime.datetime.now()
-        log.debug("Got MAG_RATIOS from wallet at startup: {}".format(MAG_RATIOS))
-        if not MAG_RATIOS:
-            raise ConnectionError("Issues connecting with Gridcoin wallet")
-    except Exception as e:
-        MAG_RATIO_SOURCE = "WEB"
-        print_and_log(
-            "Unable to connect to Gridcoin wallet. Assuming it doesn't exist. Error: ",
-            "ERROR",
-        )
-        log.error("{}".format(e))
-        print(
-            "It is suggested to install the Gridcoin wallet for the most up-to-date magnitude information"
-        )
-        print(
-            "Otherwise, we will fetch data from gridcoinstats.eu which is limited to once per day"
-        )
-        log.warning(
-            "Unable to connect to gridcoin wallet! {} Trying web-based option...".format(
-                e
-            )
-        )
-        wallet_running = False
-        if STRICT_GRIDCOIN:
-            if not SCRIPTED_RUN:
-                print("Press enter to exit")
+                input("Press enter to exit")
             sys.exit(1)
+        log.info("Guessing Gridcoin data dir is " + str(GRIDCOIN_DATA_DIR))
+        if not os.path.isdir(GRIDCOIN_DATA_DIR):
+            print_and_log(
+                "Gridcoin data dir does not appear to exist. If you have it in a non-standard location, please edit config.py so we know where to look",
+                "ERROR",
+            )
+            if not SCRIPTED_RUN:
+                input("Press enter to continue or CTRL+C to quit")
+            wallet_running = False
+
         try:
-            project_resolver_dict = get_approved_project_urls_web()
-            APPROVED_PROJECT_URLS = resolve_url_list_to_database(
-                list(project_resolver_dict.values())
-            )
-            MAG_RATIOS = get_project_mag_ratios_from_url(
-                project_resolver_dict=project_resolver_dict
-            )
-            DATABASE["MAGLASTCHECKED"] = datetime.datetime.now()
-            log.debug("Got MAG_RATIOS from web at startup: {}".format(MAG_RATIOS))
+            os.access(override_path, os.W_OK)
         except Exception as e:
             print_and_log(
-                "Error getting project URL list from URL. Are you sure it's open? Error: "
+                "This program does not have write access to your BOINC config file, meaning it can't reset settings back to your original ones upon close",
+                "ERROR",
+            )
+            print_and_log(
+                "Linux users try 'sudo chown your_username {}' to fix this error".format(
+                    override_path
+                ),
+                "INFO",
+            )
+            if not SCRIPTED_RUN:
+                input("Press enter to continue")
+
+        # Auto-detect password for BOINC RPC if it exists and user didn't know
+        # BOINC on Windows automatically generates an RPC password
+        auth_location = os.path.join(BOINC_DATA_DIR, "gui_rpc_auth.cfg")
+        if not BOINC_PASSWORD:
+            try:
+                with open(auth_location, "r") as file:
+                    data = file.read().rstrip()
+                    if data != "":
+                        BOINC_PASSWORD = data
+            except Exception as e:
+                # This error can generally be disregarded on Linux/OSX
+                if "WINDOWS" in FOUND_PLATFORM.upper():
+                    print("Error reading boinc RPC file at {}: {}".format(auth_location, e))
+                    log.error(
+                        "Error reading boinc RPC file at {}: {}".format(auth_location, e)
+                    )
+                else:
+                    log.debug(
+                        "Error reading boinc RPC file at {}: {}".format(auth_location, e)
+                    )
+
+        # Check that project weights make sense
+        total_found_values = 0
+        for url, found_value in PREFERRED_PROJECTS.items():
+            total_found_values += found_value
+        if total_found_values != 100 and len(PREFERRED_PROJECTS) > 0:
+            print_and_log(
+                "Warning: The weights of your preferred projects do not add up to 100! Quitting.",
+                "ERROR",
+            )
+            if not SCRIPTED_RUN:
+                input("Press enter to exit")
+            sys.exit(1)
+
+        # Establish connections to BOINC and Gridcoin clients, get basic info
+        boinc_client = None
+        grc_client = None
+        gridcoin_conf = None
+        try:
+            boinc_client = BoincClientConnection(config_dir=BOINC_DATA_DIR)
+        except Exception as e:
+            print_and_log(
+                "Unable to open BOINC data directory. You may need to specify location in config. Error "
                 + str(e),
                 "ERROR",
             )
             if not SCRIPTED_RUN:
                 input("Press enter to exit")
             sys.exit(1)
-    else:
-        MAG_RATIO_SOURCE = "WALLET"
-        # Check sidestakes, prompt user to enable them if they don't exist
-        CHECK_SIDESTAKE_RESULTS = check_sidestake(gridcoin_conf, foundation_address, 1)
-        if not SCRIPTED_RUN and not CHECK_SIDESTAKE_RESULTS:
-            sidestake_prompt(CHECK_SIDESTAKE_RESULTS, "FOUNDATION", foundation_address)
-        CHECK_SIDESTAKE_RESULTS = check_sidestake(gridcoin_conf, developer_address, 1)
-        if not SCRIPTED_RUN and not CHECK_SIDESTAKE_RESULTS:
-            sidestake_prompt(CHECK_SIDESTAKE_RESULTS, "DEVELOPER", developer_address)
-        print(
-            "Welcome to FindTheMag and thank you for trying out this tool. Your feedback and suggestions are welcome on the github page : )"
+        if wallet_running:
+            try:
+                gridcoin_conf = get_gridcoin_config_parameters(GRIDCOIN_DATA_DIR)
+            except Exception as e:
+                print(
+                    "Error parsing gridcoin config file in directory: "
+                    + GRIDCOIN_DATA_DIR
+                    + " Error: "
+                    + str(e)
+                )
+                log.error(
+                    "Error parsing gridcoin config file in directory: "
+                    + GRIDCOIN_DATA_DIR
+                    + " Error: "
+                    + str(e)
+                )
+                wallet_running = False
+                rpc_user = None
+                gridcoin_rpc_password = None
+                rpc_port = None
+            else:
+                # Set Gridcoin login parameters for use later
+                rpc_user = gridcoin_conf.get("rpcuser")
+                gridcoin_rpc_password = gridcoin_conf.get("rpcpassword")
+                rpc_port = gridcoin_conf.get("rpcport")
+            if not rpc_user or not gridcoin_rpc_password or not rpc_port:
+                print(
+                    "Error: Gridcoin wallet is not configured to accept RPC commands based on config file from "
+                    + str(GRIDCOIN_DATA_DIR)
+                )
+                log.error(
+                    "Error: Gridcoin wallet is not configured to accept RPC commands based on config file from "
+                    + str(GRIDCOIN_DATA_DIR)
+                )
+                print(
+                    "RPC commands enable us to talk to the Gridcoin client and get information about project magnitude ratios"
+                )
+                if not SCRIPTED_RUN:
+                    print(
+                        "Would you like us to automatically configure your Gridcoin client to accept RPC commands?"
+                    )
+                    print("It will be configured to only accept commands from your machine.")
+                    print(
+                        "If you do not enable this, this script can only update its information about project magnitudes once a day through an external website"
+                    )
+                    print("This can cause inefficient crunching and is not advised")
+                    print('Please answer "Y" or "N" without quotes. Then press the enter key')
+                    answer = input("")
+                    log.debug("User input: " + answer)
+                    while answer not in ["Y", "N", "y", "n"]:
+                        print("Error: Y or N not entered. Try again please :)")
+                        answer = input("")
+                    if answer == "N" or answer == "n":
+                        print("Ok, we won't")
+                    elif answer == "Y" or answer == "y":
+                        with open(
+                            os.path.join(GRIDCOIN_DATA_DIR, "gridcoinresearch.conf"), "a"
+                        ) as myfile:
+                            from random import choice
+                            from string import ascii_uppercase
+                            from string import ascii_lowercase
+                            from string import digits
+
+                            rpc_user = "".join(choice(ascii_uppercase) for i in range(8))
+                            gridcoin_rpc_password = "".join(
+                                choice(ascii_uppercase + ascii_lowercase + digits)
+                                for i in range(12)
+                            )
+                            rpc_port = 9876
+                            print("Your RPC username is: " + rpc_user)
+                            print("Your RPC password is: " + gridcoin_rpc_password)
+                            print("You don't need to remember these.")
+                            print("Modifying config file...")
+                            myfile.write("rpcport=9876\n")
+                            myfile.write("server=1\n")
+                            myfile.write("rpcuser=" + rpc_user + "\n")
+                            myfile.write("rpcpassword=" + gridcoin_rpc_password + "\n")
+                        print(
+                            "Alright, we've modified the config file. Please restart the gridcoin wallet."
+                        )
+                        print("Once it's loaded and --fully-- synced, press enter to continue")
+                        input("")
+
+        # Get project list from BOINC
+        rpc_client = None
+        try:
+            rpc_client = loop.run_until_complete(
+                setup_connection(BOINC_IP, BOINC_PASSWORD, BOINC_PORT)
+            )  # Setup BOINC RPC connection
+        except Exception as e:
+            print_and_log("Error: Unable to connect to BOINC client, quitting now", "ERROR")
+            sys.exit(1)
+        if not rpc_client:
+            print_and_log("Error: Unable to connect to BOINC client, quitting now", "ERROR")
+            sys.exit(1)
+        # Get project list from BOINC client directly. This is needed for
+        # correct capitalization
+        temp_project_set, temp_project_names = loop.run_until_complete(
+            get_attached_projects(rpc_client)
         )
-        CHECK_SIDESTAKE_RESULTS = check_sidestake(gridcoin_conf, developer_address, 1)
+        if not temp_project_set or not temp_project_names:
+            print_and_log(
+                "Error connecting to BOINC client, unable to get project list.", "ERROR"
+            )
+            sys.exit(1)
+        ATTACHED_PROJECT_SET.update(temp_project_set)
+        combine_dicts(BOINC_PROJECT_NAMES, temp_project_names)
+        try:
+            ALL_BOINC_PROJECTS = loop.run_until_complete(get_all_projects(rpc_client))
+        except Exception as e:
+            print("Error communicating with BOINC client, exiting")
+            safe_exit(None, None)
+
+        # Get project list from Gridcoin wallet and/or gridcoinstats, check sidestakes
+        foundation_address = "bc3NA8e8E3EoTL1qhRmeprbjWcmuoZ26A2"
+        developer_address = "RzUgcntbFm8PeSJpauk6a44qbtu92dpw3K"
+        try:
+            grc_client = GridcoinClientConnection(
+                rpc_user=rpc_user, rpc_port=rpc_port, rpc_password=gridcoin_rpc_password
+            )
+            # Test if the client is connectable
+            source_urls = grc_client.get_approved_project_urls()
+            wait_till_synced(grc_client)
+            source_urls = grc_client.get_approved_project_urls()
+            log.debug("Got source_urls from wallet: {}".format(source_urls))
+            APPROVED_PROJECT_URLS = resolve_url_list_to_database(source_urls)
+            log.debug("Got APPROVED from wallet: {}".format(APPROVED_PROJECT_URLS))
+            MAG_RATIOS = get_project_mag_ratios(grc_client, LOOKBACK_PERIOD)
+            DATABASE["MAGLASTCHECKED"] = datetime.datetime.now()
+            log.debug("Got MAG_RATIOS from wallet at startup: {}".format(MAG_RATIOS))
+            if not MAG_RATIOS:
+                raise ConnectionError("Issues connecting with Gridcoin wallet")
+        except Exception as e:
+            MAG_RATIO_SOURCE = "WEB"
+            print_and_log(
+                "Unable to connect to Gridcoin wallet. Assuming it doesn't exist. Error: ",
+                "ERROR",
+            )
+            log.error("{}".format(e))
+            print(
+                "It is suggested to install the Gridcoin wallet for the most up-to-date magnitude information"
+            )
+            print(
+                "Otherwise, we will fetch data from gridcoinstats.eu which is limited to once per day"
+            )
+            log.warning(
+                "Unable to connect to gridcoin wallet! {} Trying web-based option...".format(
+                    e
+                )
+            )
+            wallet_running = False
+            if STRICT_GRIDCOIN:
+                if not SCRIPTED_RUN:
+                    print("Press enter to exit")
+                sys.exit(1)
+            try:
+                project_resolver_dict = get_approved_project_urls_web()
+                APPROVED_PROJECT_URLS = resolve_url_list_to_database(
+                    list(project_resolver_dict.values())
+                )
+                MAG_RATIOS = get_project_mag_ratios_from_url(
+                    project_resolver_dict=project_resolver_dict
+                )
+                DATABASE["MAGLASTCHECKED"] = datetime.datetime.now()
+                log.debug("Got MAG_RATIOS from web at startup: {}".format(MAG_RATIOS))
+            except Exception as e:
+                print_and_log(
+                    "Error getting project URL list from URL. Are you sure it's open? Error: "
+                    + str(e),
+                    "ERROR",
+                )
+                if not SCRIPTED_RUN:
+                    input("Press enter to exit")
+                sys.exit(1)
+        else:
+            MAG_RATIO_SOURCE = "WALLET"
+            # Check sidestakes, prompt user to enable them if they don't exist
+            CHECK_SIDESTAKE_RESULTS = check_sidestake(gridcoin_conf, foundation_address, 1)
+            if not SCRIPTED_RUN and not CHECK_SIDESTAKE_RESULTS:
+                sidestake_prompt(CHECK_SIDESTAKE_RESULTS, "FOUNDATION", foundation_address)
+            CHECK_SIDESTAKE_RESULTS = check_sidestake(gridcoin_conf, developer_address, 1)
+            if not SCRIPTED_RUN and not CHECK_SIDESTAKE_RESULTS:
+                sidestake_prompt(CHECK_SIDESTAKE_RESULTS, "DEVELOPER", developer_address)
+            print(
+                "Welcome to FindTheMag and thank you for trying out this tool. Your feedback and suggestions are welcome on the github page : )"
+            )
+            CHECK_SIDESTAKE_RESULTS = check_sidestake(gridcoin_conf, developer_address, 1)
+            if CHECK_SIDESTAKE_RESULTS:
+                DEV_FEE_MODE = "SIDESTAKE"
+
+        # Get project list from BOINC
+        try:
+            ALL_PROJECT_URLS = boinc_client.get_project_list()
+        except Exception as e:
+            print_and_log("Error getting project URL list from BOINC " + str(e), "ERROR")
+
+        (
+            COMBINED_STATS,
+            FINAL_PROJECT_WEIGHTS,
+            total_preferred_weight,
+            total_mining_weight,
+            DEV_PROJECT_WEIGHTS,
+        ) = generate_stats(
+            approved_project_urls=APPROVED_PROJECT_URLS,
+            preferred_projects=PREFERRED_PROJECTS,
+            ignored_projects=IGNORED_PROJECTS,
+            quiet=False,
+            mag_ratios=MAG_RATIOS,
+        )
+        log.debug("Printing pretty stats...")
+        # Calculate starting efficiency stats
+        if "STARTMAGHR" not in DATABASE:
+            DATABASE["STARTMAGHR"] = get_avg_mag_hr(COMBINED_STATS)
+        else:
+            original_avg_mag_hr = DATABASE["STARTMAGHR"]
+            current_avg_mag_hr = get_avg_mag_hr(COMBINED_STATS)
+        # Generate table to print pretty
+        table_dict = {}
+        for project_url, stats_dict in COMBINED_STATS.items():
+            table_dict[project_url] = {}
+            for stat_name, stat_value in stats_dict["COMPILED_STATS"].items():
+                rounding = 2
+                if stat_name == "MAGPERCREDIT":
+                    rounding = 5
+                table_dict[project_url][stat_name] = str(round(float(stat_value), rounding))
+        print("")
+        if len(table_dict) > 0:
+            print("SOME PRETTY STATS JUST FOR YOU, SORTED BY AVG GRC/DAY")
+            priority_results = {}
+            update_table(clear=False)
+            del priority_results  # this is only created temporarily as update_table expects it
+        else:
+            print(
+                "Not enough stats to print a table of them yet, guessing this is a new BOINC install?"
+            )
+        print(
+            "Total project weight will be 1000. We will reserve a minimum .01% of processing power for monitoring each project"
+        )
+        print_and_log(
+            "Total weight for preferred projects is "
+            + str(round(float(total_preferred_weight), 2)),
+            "INFO",
+        )
+        print_and_log(
+            "Total weight for mining projects is "
+            + str(round(float(total_mining_weight), 2)),
+            "INFO",
+        )
+        print_and_log("FINAL SUGGESTED PROJECT WEIGHTS", "INFO")
+        for project, weight in FINAL_PROJECT_WEIGHTS.items():
+            print_and_log(project.lower() + ": " + str(weight), "INFO")
         if CHECK_SIDESTAKE_RESULTS:
-            DEV_FEE_MODE = "SIDESTAKE"
-
-    # Get project list from BOINC
-    try:
-        ALL_PROJECT_URLS = boinc_client.get_project_list()
-    except Exception as e:
-        print_and_log("Error getting project URL list from BOINC " + str(e), "ERROR")
-
-    (
-        COMBINED_STATS,
-        FINAL_PROJECT_WEIGHTS,
-        total_preferred_weight,
-        total_mining_weight,
-        DEV_PROJECT_WEIGHTS,
-    ) = generate_stats(
-        approved_project_urls=APPROVED_PROJECT_URLS,
-        preferred_projects=PREFERRED_PROJECTS,
-        ignored_projects=IGNORED_PROJECTS,
-        quiet=False,
-        mag_ratios=MAG_RATIOS,
-    )
-    log.debug("Printing pretty stats...")
-    # Calculate starting efficiency stats
-    if "STARTMAGHR" not in DATABASE:
-        DATABASE["STARTMAGHR"] = get_avg_mag_hr(COMBINED_STATS)
-    else:
-        original_avg_mag_hr = DATABASE["STARTMAGHR"]
-        current_avg_mag_hr = get_avg_mag_hr(COMBINED_STATS)
-    # Generate table to print pretty
-    table_dict = {}
-    for project_url, stats_dict in COMBINED_STATS.items():
-        table_dict[project_url] = {}
-        for stat_name, stat_value in stats_dict["COMPILED_STATS"].items():
-            rounding = 2
-            if stat_name == "MAGPERCREDIT":
-                rounding = 5
-            table_dict[project_url][stat_name] = str(round(float(stat_value), rounding))
-    print("")
-    if len(table_dict) > 0:
-        print("SOME PRETTY STATS JUST FOR YOU, SORTED BY AVG GRC/DAY")
-        priority_results = {}
-        update_table(clear=False)
-        del priority_results  # this is only created temporarily as update_table expects it
-    else:
-        print(
-            "Not enough stats to print a table of them yet, guessing this is a new BOINC install?"
-        )
-    print(
-        "Total project weight will be 1000. We will reserve a minimum .01% of processing power for monitoring each project"
-    )
-    print_and_log(
-        "Total weight for preferred projects is "
-        + str(round(float(total_preferred_weight), 2)),
-        "INFO",
-    )
-    print_and_log(
-        "Total weight for mining projects is "
-        + str(round(float(total_mining_weight), 2)),
-        "INFO",
-    )
-    print_and_log("FINAL SUGGESTED PROJECT WEIGHTS", "INFO")
-    for project, weight in FINAL_PROJECT_WEIGHTS.items():
-        print_and_log(project.lower() + ": " + str(weight), "INFO")
-    if CHECK_SIDESTAKE_RESULTS:
-        print(
-            "~~---***Wow THANK YOU for sidestaking to our development. You rock!***---~~~"
-        )
-        print("Yeeeehaw! We're going to the pony store!")
-        print(
-            "This also means 100% of the crunching time on this machine will be under your account, no need to crunch for developer"
-        )
-        print(
-            r"""
+            print(
+                "~~---***Wow THANK YOU for sidestaking to our development. You rock!***---~~~"
+            )
+            print("Yeeeehaw! We're going to the pony store!")
+            print(
+                "This also means 100% of the crunching time on this machine will be under your account, no need to crunch for developer"
+            )
+            print(
+                r"""
 ---             ,--,
 ----      _ ___/ /\|
 -----    ;( )__, )
 -----   ; //   '--;
 ----      \     |
 ---        v    v"""
-        )
-    else:
-        print(
-            "If you'd like to say thank you to the developers of this tool, please help us buy our next round of energy drinks by sending GRC to:"
-        )
-        print(developer_address)
-    if not CONTROL_BOINC and not SCRIPTED_RUN:
-        input("Press enter key or CTRL+C to quit")
-        sys.exit()
-    else:
-        if not SCRIPTED_RUN:
-            print("Press enter key to start controlling BOINC. Press Ctrl+C to quit")
-    if not SCRIPTED_RUN:
-        answer = input("")
-    print_and_log("Starting control of BOINC...", "DEBUG")
-    if "DARWIN" in FOUND_PLATFORM.upper() and not CHECK_SIDESTAKE_RESULTS:
-        print_and_log(
-            'Sidestaking must be setup for BOINC control on OS X as "crunch for dev" is not an option. Re-run the script to set this up.',
-            "ERROR",
-        )
-        sys.exit(1)
-
-    # Backup user preferences.
-    try:
-        shutil.copy(override_path, override_dest_path)
-    except Exception as e:
-        log.warning(
-            "global_prefs_override.xml does not appear to exist, not backing up. Some users may not have one. Error: {}".format(
-                e
             )
-        )
-
-    verification_result = loop.run_until_complete(verify_boinc_connection(rpc_client))
-    if not verification_result:
-        print_and_log(
-            "Error connecting to BOINC client, does your gui_rpc_auth.cfg specify a password or a non-standard port?\n If so, be sure to include it in your config.py",
-            "ERROR",
-        )
-        print("You can find your gui_rpc_auth.cfg at {}".format(auth_location))
-        print(
-            "Linux users: make sure your username is in the BOINC group so FTM can access your BOINC config file"
-        )
-        print("sudo usermod -aG boinc your_username_here")
-        print(
-            "Note that you will need to restart your computer after changing your group permissions"
-        )
+        else:
+            print(
+                "If you'd like to say thank you to the developers of this tool, please help us buy our next round of energy drinks by sending GRC to:"
+            )
+            print(developer_address)
+        if not CONTROL_BOINC and not SCRIPTED_RUN:
+            input("Press enter key or CTRL+C to quit")
+            sys.exit()
+        else:
+            if not SCRIPTED_RUN:
+                print("Press enter key to start controlling BOINC. Press Ctrl+C to quit")
         if not SCRIPTED_RUN:
-            answer = input("Press enter to quit")
-        sys.exit(1)
-    try:
-        loop.run_until_complete(prefs_check(rpc_client, testing=TESTING))
-    except Exception as e:
-        print_and_log(
-            "Error connecting to BOINC for prefs_check. Is BOINC running?", "ERROR"
-        )
-        sys.exit(1)
-    # NNT all projects
-    nnt_response = loop.run_until_complete(nnt_all_projects(rpc_client))
-    # Abort unstarted tasks if the user requested it
-    if ABORT_UNSTARTED_TASKS:
-        loop.run_until_complete(kill_all_unstarted_tasks(rpc_client))
-    priority_results = {}
-    highest_priority_project = ""
-    highest_priority_projects = []
-    # Force calculation of stats at first run since they are not cached in DB
-    DATABASE["STATSLASTCALCULATED"] = datetime.datetime(1997, 3, 3)
-    # While we don't have enough tasks, continue cycling through project list and
-    # updating. If we have cycled through all projects, get_highest_priority_project
-    # will stall to prevent requesting too often
-    boinc_loop(False, rpc_client)
+            answer = input("")
+        print_and_log("Starting control of BOINC...", "DEBUG")
+        if "DARWIN" in FOUND_PLATFORM.upper() and not CHECK_SIDESTAKE_RESULTS:
+            print_and_log(
+                'Sidestaking must be setup for BOINC control on OS X as "crunch for dev" is not an option. Re-run the script to set this up.',
+                "ERROR",
+            )
+            sys.exit(1)
+
+        # Backup user preferences.
+        try:
+            shutil.copy(override_path, override_dest_path)
+        except Exception as e:
+            log.warning(
+                "global_prefs_override.xml does not appear to exist, not backing up. Some users may not have one. Error: {}".format(
+                    e
+                )
+            )
+
+        verification_result = loop.run_until_complete(verify_boinc_connection(rpc_client))
+        if not verification_result:
+            print_and_log(
+                "Error connecting to BOINC client, does your gui_rpc_auth.cfg specify a password or a non-standard port?\n If so, be sure to include it in your config.py",
+                "ERROR",
+            )
+            print("You can find your gui_rpc_auth.cfg at {}".format(auth_location))
+            print(
+                "Linux users: make sure your username is in the BOINC group so FTM can access your BOINC config file"
+            )
+            print("sudo usermod -aG boinc your_username_here")
+            print(
+                "Note that you will need to restart your computer after changing your group permissions"
+            )
+            if not SCRIPTED_RUN:
+                answer = input("Press enter to quit")
+            sys.exit(1)
+        try:
+            loop.run_until_complete(prefs_check(rpc_client, testing=TESTING))
+        except Exception as e:
+            print_and_log(
+                "Error connecting to BOINC for prefs_check. Is BOINC running?", "ERROR"
+            )
+            sys.exit(1)
+        # NNT all projects
+        nnt_response = loop.run_until_complete(nnt_all_projects(rpc_client))
+        # Abort unstarted tasks if the user requested it
+        if ABORT_UNSTARTED_TASKS:
+            loop.run_until_complete(kill_all_unstarted_tasks(rpc_client))
+        priority_results = {}
+        highest_priority_project = ""
+        highest_priority_projects = []
+        # Force calculation of stats at first run since they are not cached in DB
+        DATABASE["STATSLASTCALCULATED"] = datetime.datetime(1997, 3, 3)
+        # While we don't have enough tasks, continue cycling through project list and
+        # updating. If we have cycled through all projects, get_highest_priority_project
+        # will stall to prevent requesting too often
+        boinc_loop(False, rpc_client)
     # Restore user prefs
     safe_exit(None, None)
