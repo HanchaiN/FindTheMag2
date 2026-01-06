@@ -124,4 +124,5 @@ BOINC_PASSWORD = None  # defaults to None, password to the BOINC rpc
 BOINC_PORT = 31416
 
 STAT_FILE = "stats.json"
+EXIT_NNT = None
 # fmt: on

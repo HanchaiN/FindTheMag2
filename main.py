@@ -95,6 +95,7 @@ DUMP_DATABASE: bool = False  # Dump the DATABASE
 DEV_FEE_MODE: str = "CRUNCH"  # valid values: CRUNCH|SIDESTAKE
 CRUNCHING_FOR_DEV: bool = False
 DEV_EXIT_TEST: bool = False  # Only used for testing
+EXIT_NNT: bool | None = None
 
 # Some globals we need. I try to have all globals be ALL CAPS
 FORCE_DEV_MODE = (
@@ -674,16 +675,20 @@ def safe_exit(arg1, arg2) -> None:
         else:
             os.remove(override_dest_path)
     
-    try:
-        rpc_client = new_loop.run_until_complete(
-            setup_connection(BOINC_IP, BOINC_PASSWORD, port=BOINC_PORT)
-        )  # Setup dev BOINC RPC connection
-        authorize_response = new_loop.run_until_complete(
-            rpc_client.authorize(BOINC_PASSWORD)
-        )  # Authorize dev RPC connection
-        new_loop.run_until_complete(undo_nnt_all_projects(rpc_client))
-    except Exception as e:
-        log.error("Error undoing NNT in main client {}".format(e))
+    if EXIT_NNT is not None:
+        try:
+            rpc_client = new_loop.run_until_complete(
+                setup_connection(BOINC_IP, BOINC_PASSWORD, port=BOINC_PORT)
+            )  # Setup dev BOINC RPC connection
+            authorize_response = new_loop.run_until_complete(
+                rpc_client.authorize(BOINC_PASSWORD)
+            )  # Authorize dev RPC connection
+            if EXIT_NNT:
+                new_loop.run_until_complete(nnt_all_projects(rpc_client))
+            else:
+                new_loop.run_until_complete(undo_nnt_all_projects(rpc_client))
+        except Exception as e:
+            log.error("Error {} in main client {}".format("NNTing" if EXIT_NNT else "undo-NNTing", e))
     
     try:
         loop.close()
