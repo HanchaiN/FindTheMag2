@@ -2423,7 +2423,7 @@ def print_table(
             working_dict[name]["GRC/HR"] = rounded_grc_per_hour
             working_dict[name]["GRC/DAY"] = rounded_grc_per_day
             if float(working_dict[name].get("MAG/HR")) != 0:
-                revenue_per_day = (grc_per_day) * DATABASE.get("GRCPRICE", 0) / DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)
+                revenue_per_day = (grc_per_day) * DATABASE.get("GRCPRICE", 0) * DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)
                 exchange_expenses = revenue_per_day * EXCHANGE_FEE
                 expenses_per_day = exchange_expenses + (HOST_COST_PER_HOUR * 24)
                 profit = revenue_per_day - expenses_per_day
@@ -2496,7 +2496,7 @@ def print_table(
     bottom_bar_2 = left_align("Info: {}".format(status), total_len=60, min_pad=1)
     bottom_bar_3 = (
         left_align(
-            "GRC Price: {:.6f}".format(DATABASE.get("GRCPRICE", 0.00000) / DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)),
+            "GRC Price: {:.6f}".format(DATABASE.get("GRCPRICE", 0.00000) * DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)),
             total_len=19,
             min_pad=1,
         )
@@ -4058,7 +4058,7 @@ def boinc_loop(
             profitability_list = []
             for project in highest_priority_projects:
                 profitability_result = profitability_check(
-                    grc_price=grc_price / currency_rate,
+                    grc_price=grc_price * currency_rate,
                     exchange_fee=EXCHANGE_FEE,
                     grc_sell_price=GRC_SELL_PRICE,
                     project=project,
@@ -4318,7 +4318,7 @@ def boinc_loop(
                 skip_benchmarking=SKIP_BENCHMARKING,
             )
             profitability_result = profitability_check(
-                grc_price=grc_price / currency_rate,
+                grc_price=grc_price * currency_rate,
                 exchange_fee=EXCHANGE_FEE,
                 grc_sell_price=GRC_SELL_PRICE,
                 project=highest_priority_project,
