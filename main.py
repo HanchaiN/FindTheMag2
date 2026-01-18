@@ -58,6 +58,8 @@ BOINC_PORT: int = 31416
 BOINC_USERNAME: Union[str, None] = None
 BOINC_PASSWORD: Union[str, None] = None
 STAT_FILE: str = "stats.json"
+MIN_GB: float = 10
+EXPECTED_GB_USED: float = 0.5
 # Minimum time in minutes before re-asking a project for work who previously said
 # they were out
 MIN_RECHECK_TIME: int = 30
@@ -3177,19 +3179,15 @@ async def prefs_check(
         disk_usage = usage
     max_gb = int(float(global_prefs.get("disk_max_used_gb", 0)))
     used_max_gb = int(int(disk_usage["d_allowed"]) / 1024 / 1024 / 1024)
-    if (max_gb < 10 and max_gb != 0) or used_max_gb < 9.5:
+    if (max_gb < MIN_GB and max_gb != 0) or used_max_gb < (MIN_GB - EXPECTED_GB_USED):
         if not testing:
-            print(
-                "BOINC is configured to use less than 10GB, this tool will not run with <10GB allocated in order to prevent requesting base project files from projects too often."
+            print_and_log(
+                "BOINC is configured to use less than {}GB, this tool will not run with <{}GB allocated in order to prevent requesting base project files from projects too often.".format(MIN_GB, MIN_GB),
+                "ERROR"
             )
-            log.error(
-                "BOINC is configured to use less than 10GB, this tool will not run with <10GB allocated in order to prevent requesting base project files from projects too often."
-            )
-            print(
-                'If you have configured BOINC to be able to use >=10GB and still get this message, it is because you are low on disk space and BOINC is responding to settings such as "don\'t use greater than X% of space" or "leave x% free"'
-            )
-            log.error(
-                'If you have configured BOINC to be able to use >=10GB and still get this message, it is because you are low on disk space and BOINC is responding to settings such as "don\'t use greater than X% of space" or "leave x% free"'
+            print_and_log(
+                'If you have configured BOINC to be able to use >={}GB and still get this message, it is because you are low on disk space and BOINC is responding to settings such as "don\'t use greater than X% of space" or "leave x% free"'.format(MIN_GB),
+                "ERROR"
             )
             if not SCRIPTED_RUN:
                 input("Press enter to quit")
