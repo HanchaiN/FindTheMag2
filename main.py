@@ -117,7 +117,6 @@ DATABASE[
 SCRIPTED_RUN: bool = False
 SKIP_TABLE_UPDATES: bool = False
 STRICT_GRIDCOIN: bool = False
-HOST_COST_PER_HOUR = (HOST_POWER_USAGE / 1000) * LOCAL_KWH
 LAST_KNOWN_CPU_MODE = None
 LAST_KNOWN_GPU_MODE = None
 LOOKUP_URL_TO_DATABASE = {}  # Lookup table for uppered URLS -> canonical URLs.
@@ -212,6 +211,9 @@ if os.path.exists("user_config.py"):
             )
             print(error)
             sys.exit(1)
+
+HOST_COST_PER_HOUR = (HOST_POWER_USAGE / 1000) * LOCAL_KWH
+
 # Setup logging
 log = logging.getLogger()
 if LOG_LEVEL == "NONE":
