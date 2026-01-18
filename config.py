@@ -28,6 +28,7 @@ IGNORED_PROJECTS = [
 ##########################################################################################################################################
 ONLY_BOINC_IF_PROFITABLE = False  # suspend BOINC completely whenever crunching is not profitable
 ONLY_MINE_IF_PROFITABLE = False  # only run non-preferred projects when doing so is profitable. Benchmarking will still occur.
+CURRENCY_CODE = "USD"  # 3-letter currency code for the following variables.
 LOCAL_KWH = 0.1542  # your local price of energy per kwh in USD. Default: 0.1542 (US National average). You can find this on your electric bill.
 GRC_SELL_PRICE = None  # the price you intend to sell your mined GRC at. Leave None to use "current price" or put in USD value of 1 GRC. This is used to determine if mining is "profitable" or not
 EXCHANGE_FEE = 0  # amount to factor into "sell price" when determining profitability. For 3% put .03, for 10% put .10 etc. Default is 0
@@ -125,4 +126,5 @@ BOINC_PORT = 31416
 
 STAT_FILE = "stats.json"
 EXIT_NNT = None
+EXTERNAL_REQUEST_PROXIES = {}
 # fmt: on

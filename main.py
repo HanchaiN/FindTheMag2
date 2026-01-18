@@ -27,6 +27,7 @@ try:
     from typing import List, Union, Dict, Tuple, Set, Any
     import sys, signal
     from grc_price_utils import get_grc_price_from_sites
+    from currency_utils import get_currency_from_sites
 
     # This is needed for some async stuff
     import nest_asyncio
@@ -65,6 +66,7 @@ PRICE_CHECK_INTERVAL: int = 720
 LOCAL_KWH: float = 0.1542
 GRC_SELL_PRICE: Union[float, None] = None
 EXCHANGE_FEE: float = 0.00
+CURRENCY_CODE: str = "USD"
 ONLY_BOINC_IF_PROFITABLE: bool = False
 ONLY_MINE_IF_PROFITABLE: bool = False
 HOST_POWER_USAGE: float = 70
@@ -1023,6 +1025,53 @@ def get_grc_price(sample_text: str = None) -> Union[float, None]:
         print_and_log(url_message, "ERROR")
 
     return DATABASE.get("GRCPRICE", 0)
+
+
+def get_currency_rate(currency_code: str = "USD", sample_text: str = None) -> Union[float, None]:
+    """
+    Gets average currency exchange rate from online sources. Returns None if unable to determine
+    @sample_text: Used for testing. Just a "view source" of all pages added together
+    """
+    """Retrieve current average currency exchange rate.
+
+    Calculates the average currency exchange rate based on values from three online sources.
+
+    Note: Retrieving the prices is dependent on the target website formatting. If the
+    source website changes significantly, retrieval may fail until the relevant 
+    search pattern in updated.
+
+    Args:
+        sample_text: Used for testing. 
+                     Typicaly a "view source" of all pages added together.
+
+    Returns:
+        Average currency exchange rate in decimal, or None if unable to determine price.
+
+    Raises:
+        Exception: An error occurred accessing an online currency exchange rate source.
+    """
+    price, table_message, url_messages, info_log_messages, error_log_messages = get_currency_from_sites(currency_code)
+
+    for log_message in info_log_messages:
+        log.info(log_message)
+
+    for log_message in error_log_messages:
+        log.error(log_message)
+
+    if price:
+        DATABASE["TABLE_STATUS"] = table_message
+
+        for url_message in url_messages:
+            print_and_log(url_message, "ERROR")
+
+        return price
+
+    DATABASE["TABLE_STATUS"] = table_message
+
+    for url_message in url_messages:
+        print_and_log(url_message, "ERROR")
+
+    return DATABASE.get(f"CURRENCY_{currency_code}", 1)
 
 
 def get_approved_project_urls_web(query_result: str = None) -> Dict[str, str]:
@@ -2368,21 +2417,21 @@ def print_table(
             working_dict[name]["GRC/HR"] = rounded_grc_per_hour
             working_dict[name]["GRC/DAY"] = rounded_grc_per_day
             if float(working_dict[name].get("MAG/HR")) != 0:
-                revenue_per_day = (grc_per_day) * DATABASE.get("GRCPRICE", 0)
+                revenue_per_day = (grc_per_day) * DATABASE.get("GRCPRICE", 0) / DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)
                 exchange_expenses = revenue_per_day * EXCHANGE_FEE
                 expenses_per_day = exchange_expenses + (HOST_COST_PER_HOUR * 24)
                 profit = revenue_per_day - expenses_per_day
                 rounded_revenue_per_day = str(
-                    round(revenue_per_day, ROUNDING_DICT.get("USD/DAY R", 3))
+                    round(revenue_per_day, ROUNDING_DICT.get(f"{CURRENCY_CODE}/DAY R", 3))
                 )
                 rounded_profit_per_day = str(
-                    round(profit, ROUNDING_DICT.get("USD/DAY P", 3))
+                    round(profit, ROUNDING_DICT.get(f"{CURRENCY_CODE}/DAY P", 3))
                 )
-                working_dict[name]["USD/DAY R/P"] = "{}/{}".format(
+                working_dict[name][f"{CURRENCY_CODE}/DAY R/P"] = "{}/{}".format(
                     rounded_revenue_per_day, rounded_profit_per_day
                 )
             else:
-                working_dict[name]["USD/DAY R/P"] = "0"
+                working_dict[name][f"{CURRENCY_CODE}/DAY R/P"] = "0"
             del working_dict[name]["MAG/HR"]
 
     # figure out table headings
@@ -2441,7 +2490,7 @@ def print_table(
     bottom_bar_2 = left_align("Info: {}".format(status), total_len=60, min_pad=1)
     bottom_bar_3 = (
         left_align(
-            "GRC Price: {:.6f}".format(DATABASE.get("GRCPRICE", 0.00000)),
+            "GRC Price: {:.6f}".format(DATABASE.get("GRCPRICE", 0.00000) / DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)),
             total_len=19,
             min_pad=1,
         )
@@ -2488,7 +2537,7 @@ def print_table(
         "RWTIME is wall-time crunched during window (default is 60 days). Windows help FTM track changes in how projects award credit"
     )
     print(
-        "USD/DAY R/P is revenue and profit per day in USD. Uses electrical costs from your user_config.py"
+        f"{CURRENCY_CODE}/DAY R/P is revenue and profit per day in {CURRENCY_CODE}. Uses electrical costs from your user_config.py"
     )
     print("*" * table_width)
 
@@ -3986,13 +4035,28 @@ def boinc_loop(
         else:
             grc_price = DATABASE.get("GRCPRICE",0)
 
+        # If we haven't checked currency exchange rate in a while, do it
+        price_check_delta = datetime.datetime.now() - DATABASE.get(
+            f"CURRENCYLASTCHECKED_{CURRENCY_CODE}", datetime.datetime(1993, 3, 3)
+        )
+        price_check_calc = (abs(price_check_delta.days) * 24 * 60) + (
+            abs(price_check_delta.seconds) / 60
+        )
+        if price_check_calc > max(PRICE_CHECK_INTERVAL, 60):
+            currency_rate = get_currency_rate(CURRENCY_CODE)
+            DATABASE[f"CURRENCYLASTCHECKED_{CURRENCY_CODE}"] = datetime.datetime.now()
+            if currency_rate:
+                DATABASE[f"CURRENCY_{CURRENCY_CODE}"] = currency_rate
+        else:
+            currency_rate = DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)
+
         # Check profitability of all projects, if none profitable
         # (and user doesn't want unprofitable crunching), sleep for 1hr
         if ONLY_BOINC_IF_PROFITABLE and not dev_loop:
             profitability_list = []
             for project in highest_priority_projects:
                 profitability_result = profitability_check(
-                    grc_price=grc_price,
+                    grc_price=grc_price / currency_rate,
                     exchange_fee=EXCHANGE_FEE,
                     grc_sell_price=GRC_SELL_PRICE,
                     project=project,
@@ -4252,7 +4316,7 @@ def boinc_loop(
                 skip_benchmarking=SKIP_BENCHMARKING,
             )
             profitability_result = profitability_check(
-                grc_price=grc_price,
+                grc_price=grc_price / currency_rate,
                 exchange_fee=EXCHANGE_FEE,
                 grc_sell_price=GRC_SELL_PRICE,
                 project=highest_priority_project,
