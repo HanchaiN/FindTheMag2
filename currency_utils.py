@@ -45,6 +45,7 @@ def parse_currency_soup(
 
 def get_currency_from_sites(
     currency_code: str,
+    proxies: Union[Dict[str, str]] = None
 ) -> Tuple[Union[float, None], str, List[str], List[str], List[str]]:
     if currency_code == "USD":
         return (
@@ -64,7 +65,7 @@ def get_currency_from_sites(
     for url_ in CURRENCY_URLS:
         url = url_.format(code=currency_code)
         try:
-            response = requests.get(url, headers=headers, timeout=5)
+            response = requests.get(url, headers=headers, timeout=5, proxies=proxies)
         except requests.exceptions.Timeout as error:
             error_logger_messages.append(f"Error fetching stats from {url}: {error}")
             continue

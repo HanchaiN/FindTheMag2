@@ -40,6 +40,7 @@ except Exception as e:
         "Error loading some required modules. Make sure you have installed the modules in requirements.txt as documented in the README"
     )
     print(str(e))
+    import sys
     sys.exit(1)
 
 
@@ -135,6 +136,7 @@ PRINT_URL_LOOKUP_TABLE: Dict[
 ] = {}  # Used to convert urls for printing to table
 MAG_RATIO_SOURCE: Union[str, None] = None  # Valid values: WALLET|WEB
 CHECK_SIDESTAKE_RESULTS = False
+EXTERNAL_REQUEST_PROXIES: Union[Dict[str, str]] = None
 loop = asyncio.get_event_loop()
 # Translates BOINC's CPU and GPU Mode replies into English. Note difference between
 # keys integer vs string.
@@ -920,7 +922,7 @@ def update_fetch(
         )
         url = "https://raw.githubusercontent.com/makeasnek/FindTheMag2/main/updates.txt"
         try:
-            resp = req.get(url, headers=headers).text
+            resp = req.get(url, headers=headers, proxies=EXTERNAL_REQUEST_PROXIES).text
         except Exception as e:
             DATABASE["TABLE_STATUS"] = "Error checking for updates {}".format(e)
             log.error("Error checking for updates {}".format(e))
@@ -1003,7 +1005,7 @@ def get_grc_price(sample_text: str = None) -> Union[float, None]:
     Raises:
         Exception: An error occurred accessing an online GRC price source.
     """
-    price, table_message, url_messages, info_log_messages, error_log_messages = get_grc_price_from_sites()
+    price, table_message, url_messages, info_log_messages, error_log_messages = get_grc_price_from_sites(proxies=EXTERNAL_REQUEST_PROXIES)
 
     for log_message in info_log_messages:
         log.info(log_message)
@@ -1027,7 +1029,7 @@ def get_grc_price(sample_text: str = None) -> Union[float, None]:
     return DATABASE.get("GRCPRICE", 0)
 
 
-def get_currency_rate(currency_code: str = "USD", sample_text: str = None) -> Union[float, None]:
+def get_currency_rate(currency_code: str, sample_text: str = None) -> Union[float, None]:
     """
     Gets average currency exchange rate from online sources. Returns None if unable to determine
     @sample_text: Used for testing. Just a "view source" of all pages added together
@@ -1050,7 +1052,7 @@ def get_currency_rate(currency_code: str = "USD", sample_text: str = None) -> Un
     Raises:
         Exception: An error occurred accessing an online currency exchange rate source.
     """
-    price, table_message, url_messages, info_log_messages, error_log_messages = get_currency_from_sites(currency_code)
+    price, table_message, url_messages, info_log_messages, error_log_messages = get_currency_from_sites(currency_code, proxies=EXTERNAL_REQUEST_PROXIES)
 
     for log_message in info_log_messages:
         log.info(log_message)
@@ -1111,7 +1113,7 @@ def get_approved_project_urls_web(query_result: str = None) -> Dict[str, str]:
 
         url = "https://www.gridcoinstats.eu/API/simpleQuery.php?q=listprojects"
         try:
-            resp = req.get(url)
+            resp = req.get(url, proxies=EXTERNAL_REQUEST_PROXIES)
         except Exception as e:
             print("Error fetching magnitude stats from {}".format(url))
             log.error("Error fetching magnitude stats from {}: {}".format(url, e))
@@ -3347,7 +3349,7 @@ def get_project_mag_ratios_from_url(
     mag_per_project = 0
     url = "https://www.gridcoinstats.eu/API/simpleQuery.php?q=superblocks"
     try:
-        resp = req.get(url)
+        resp = req.get(url, proxies=EXTERNAL_REQUEST_PROXIES)
     except Exception as e:
         print("Error retrieving project mag ratios from gridcoinstats.eu")
         if len(PROJECT_MAG_RATIOS_CACHE) > 0:
