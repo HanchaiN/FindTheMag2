@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import random
-from typing import Union, List, Tuple
+from typing import Union, Dict, List, Tuple
 
 import requests
 
