@@ -105,6 +105,7 @@ DEV_FEE_MODE: str = "CRUNCH"  # valid values: CRUNCH|SIDESTAKE
 CRUNCHING_FOR_DEV: bool = False
 DEV_EXIT_TEST: bool = False  # Only used for testing
 EXIT_NNT: bool | None = None
+JOURNALD_NAME: str | None = None
 
 # Some globals we need. I try to have all globals be ALL CAPS
 FORCE_DEV_MODE = (
@@ -223,17 +224,26 @@ log = logging.getLogger()
 if LOG_LEVEL == "NONE":
     log.addHandler(logging.NullHandler())
 else:
-    handler = logging.handlers.RotatingFileHandler(
-        os.environ.get("LOGFILE", "debug.log"),
-        maxBytes=MAX_LOGFILE_SIZE_IN_MB * 1024 * 1024,
-        backupCount=1,
-    )
     log.setLevel(os.environ.get("LOGLEVEL", LOG_LEVEL))
-    formatter = logging.Formatter(
-        fmt="[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] %(message)s"
-    )
-    handler.setFormatter(formatter)
-    log.addHandler(handler)
+    use_logfile=True
+    if JOURNALD_NAME is not None:
+        try:
+            from systemd import journal
+            log.addHandler(journal.JournalHandler(SYSLOG_IDENTIFIER=JOURNALD_NAME))
+            use_logfile=False
+        except Exception as e:
+            print("Error importing systemd.journal, fallback to LOGFILE")
+    if use_logfile:
+        handler = logging.handlers.RotatingFileHandler(
+            os.environ.get("LOGFILE", "debug.log"),
+            maxBytes=MAX_LOGFILE_SIZE_IN_MB * 1024 * 1024,
+            backupCount=1,
+        )
+        formatter = logging.Formatter(
+            fmt="[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] %(message)s"
+        )
+        handler.setFormatter(formatter)
+        log.addHandler(handler)
     log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
     log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
     log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
@@ -692,7 +702,7 @@ def safe_exit(arg1, arg2) -> None:
             )
         else:
             os.remove(override_dest_path)
-    
+
     if EXIT_NNT is not None:
         try:
             rpc_client = new_loop.run_until_complete(
@@ -711,7 +721,7 @@ def safe_exit(arg1, arg2) -> None:
                     "NNTing" if EXIT_NNT else "undo-NNTing", e
                 )
             )
-    
+
     try:
         loop.close()
     except Exception as e:
@@ -4287,7 +4297,7 @@ def boinc_loop(
                     log.info("Starting crunching under dev account, entering dev loop")
                     DATABASE["TABLE_SLEEP_REASON"] = (
                         "Crunching for developer's account, {}% of crunching total".format(
-                        DEV_FEE * 100
+                            DEV_FEE * 100
                         )
                     )
                     DEV_LOOP_RUNNING = True
@@ -4392,7 +4402,7 @@ def boinc_loop(
             ):
                 DATABASE["TABLE_STATUS"] = (
                     "Skipping work fetch for {} bc not profitable and ONLY_MINE_IF_PROFITABLE set to true".format(
-                    database_url
+                        database_url
                     )
                 )
                 update_table(dev_loop=dev_loop)
@@ -4417,7 +4427,7 @@ def boinc_loop(
             if minutes_since_last_project_check < backoff_period:
                 DATABASE["TABLE_STATUS"] = (
                     "Skipping {} due to backoff period...".format(
-                    highest_priority_project
+                        highest_priority_project
                     )
                 )
                 update_table(dev_loop=dev_loop)
@@ -4609,40 +4619,40 @@ def create_default_database() -> Dict[str, Any]:
 
 
 class GracefulInterruptHandler(object):
-    
+
     def __init__(self, sig=signal.SIGINT, handler=lambda _, __: None):
         try:
             self.sig = list(sig)
         except TypeError:
             self.sig = [sig]
         self.handler = handler
-        
+
     def __enter__(self):
         self.released = False
-        
+
         self.original_handlers = {sig: signal.getsignal(sig) for sig in self.sig}
-        
+
         def handler(signum, frame):
             self.handler(signum, frame)
-        
+
         for sig in self.sig:
             signal.signal(sig, handler)
-        
+
         return self
-        
+
     def __exit__(self, type, value, tb):
         self.release()
-        
+
     def release(self):
-        
+
         if self.released:
             return False
 
         for sig, original_handler in self.original_handlers.items():
             signal.signal(sig, original_handler)
-        
+
         self.released = True
-        
+
         return True
 
 
