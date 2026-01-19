@@ -106,6 +106,7 @@ DEV_EXIT_TEST: bool = False  # Only used for testing
 EXIT_NNT: bool | None = None
 STAT_FILE: str = "stats.json"
 JOURNALD_NAME: str | None = None
+CYCLE_SLEEP_TIME: int = 30
 
 # Some globals we need. I try to have all globals be ALL CAPS
 FORCE_DEV_MODE = (
@@ -4411,7 +4412,7 @@ def boinc_loop(
                 )
                 update_table(dev_loop=dev_loop)
                 log.info(
-                    "Skipping work fetch for {} bc not profitable and only_boinc_if_profitable is set to true".format(
+                    "Skipping work fetch for {} bc not profitable and ONLY_BOINC_IF_PROFITABLE is set to true".format(
                         database_url
                     )
                 )
@@ -4420,9 +4421,10 @@ def boinc_loop(
             # it's not profitable or in benchmarking mode, skip
             if (
                 ONLY_MINE_IF_PROFITABLE
+                and not benchmark_result
                 and not profitability_result
-                and FINAL_PROJECT_WEIGHTS[database_url] != 1
                 and not dev_loop
+                and database_url not in PREFERRED_PROJECTS
             ):
                 DATABASE["TABLE_STATUS"] = (
                     "Skipping work fetch for {} bc not profitable and ONLY_MINE_IF_PROFITABLE set to true".format(
@@ -4611,8 +4613,8 @@ def boinc_loop(
                 rpc_client, "project_allowmorework", "project_url", allow_this_project
             )
         )
-        # There's no reason to loop through all projects more than once every 30 minutes
-        custom_sleep(30, rpc_client, dev_loop=dev_loop)
+        # There's no reason to loop through all projects too often.
+        custom_sleep(CYCLE_SLEEP_TIME, rpc_client, dev_loop=dev_loop)
 
 
 def print_and_log(msg: str, log_level: str) -> None:
