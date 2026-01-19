@@ -648,24 +648,6 @@ def safe_exit(arg1, arg2) -> None:
         new_loop.run_until_complete(dev_cleanup(rpc_client=None))
     shutdown_dev_client()
 
-    # Restore crunching settings pre-dev-mode
-    if CRUNCHING_FOR_DEV:
-        try:
-            rpc_client = new_loop.run_until_complete(
-                setup_connection(BOINC_IP, BOINC_PASSWORD, port=BOINC_PORT)
-            )  # Setup dev BOINC RPC connection
-            authorize_response = new_loop.run_until_complete(
-                rpc_client.authorize(BOINC_PASSWORD)
-            )  # Authorize dev RPC connection
-            new_loop.run_until_complete(
-                run_rpc_command(rpc_client, "set_gpu_mode", LAST_KNOWN_GPU_MODE)
-            )
-            new_loop.run_until_complete(
-                run_rpc_command(rpc_client, "set_run_mode", LAST_KNOWN_CPU_MODE)
-            )
-        except Exception as e:
-            log.error("Error restoring crunching status in main client {}".format(e))
-
     # Restore original BOINC preferences
     if os.path.exists(override_dest_path):
         print_and_log("Restoring original preferences...", "DEBUG")
@@ -704,25 +686,47 @@ def safe_exit(arg1, arg2) -> None:
         else:
             os.remove(override_dest_path)
 
-    if EXIT_NNT is not None:
-        print_and_log("Restoring: {}...".format("NNTing" if EXIT_NNT else "undo-NNTing"), "DEBUG")
+    rpc_client = None
+    try:
+        rpc_client = new_loop.run_until_complete(
+            setup_connection(BOINC_IP, BOINC_PASSWORD, port=BOINC_PORT)
+        )  # Setup dev BOINC RPC connection
+        authorize_response = new_loop.run_until_complete(
+            rpc_client.authorize(BOINC_PASSWORD)
+        )  # Authorize dev RPC connection
+    except Exception as e:
+        log.error("Error connecting to the main client {}".format(e))
+
+    if rpc_client is not None:
+        # Restore crunching settings pre-dev-mode
         try:
-            rpc_client = new_loop.run_until_complete(
-                setup_connection(BOINC_IP, BOINC_PASSWORD, port=BOINC_PORT)
-            )  # Setup dev BOINC RPC connection
-            authorize_response = new_loop.run_until_complete(
-                rpc_client.authorize(BOINC_PASSWORD)
-            )  # Authorize dev RPC connection
-            if EXIT_NNT:
-                new_loop.run_until_complete(nnt_all_projects(rpc_client))
-            else:
-                new_loop.run_until_complete(undo_nnt_all_projects(rpc_client))
-        except Exception as e:
-            log.error(
-                "Error {} in main client {}".format(
-                    "NNTing" if EXIT_NNT else "undo-NNTing", e
+            if LAST_KNOWN_CPU_MODE is not None:
+                new_loop.run_until_complete(
+                    run_rpc_command(rpc_client, "set_gpu_mode", LAST_KNOWN_CPU_MODE)
                 )
-            )
+        except Exception as e:
+            log.error("Error restoring CPU crunching status in main client {}".format(e))
+        try:
+            if LAST_KNOWN_GPU_MODE is not None:
+                new_loop.run_until_complete(
+                    run_rpc_command(rpc_client, "set_gpu_mode", LAST_KNOWN_GPU_MODE)
+                )
+        except Exception as e:
+            log.error("Error restoring GPU crunching status in main client {}".format(e))
+
+        if EXIT_NNT is not None:
+            print_and_log("Restoring: {}...".format("NNTing" if EXIT_NNT else "undo-NNTing"), "DEBUG")
+            try:
+                if EXIT_NNT:
+                    new_loop.run_until_complete(nnt_all_projects(rpc_client))
+                else:
+                    new_loop.run_until_complete(undo_nnt_all_projects(rpc_client))
+            except Exception as e:
+                log.error(
+                    "Error {} in main client {}".format(
+                        "NNTing" if EXIT_NNT else "undo-NNTing", e
+                    )
+                )
 
     try:
         loop.close()
@@ -3609,7 +3613,7 @@ def save_stats(database: Any, path: str = None) -> None:
     SAVE_STATS_DB[path] = copy.deepcopy(database)
 
 
-def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> int:
+def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> float:
     global ENABLE_TEMP_CONTROL
     global LAST_KNOWN_CPU_MODE
     global CPU_MODE_DICT
