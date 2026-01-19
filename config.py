@@ -127,6 +127,8 @@ BOINC_PORT = 31416
 STAT_FILE = "stats.json"
 JOURNALD_NAME = None
 CYCLE_SLEEP_TIME = 30  # There's no reason to loop through all projects more than once every 30 minutes
+CYCLE_CHECK_TIME = 1   # Check for temperature and crunching once every 1 minute
+CYCLE_SAVE_TIME = 10   # Save database every ten minutes
 EXIT_NNT = None
 EXTERNAL_REQUEST_PROXIES = {}
 # fmt: on

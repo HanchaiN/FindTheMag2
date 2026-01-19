@@ -106,7 +106,9 @@ DEV_EXIT_TEST: bool = False  # Only used for testing
 EXIT_NNT: bool | None = None
 STAT_FILE: str = "stats.json"
 JOURNALD_NAME: str | None = None
-CYCLE_SLEEP_TIME: int = 30
+CYCLE_SLEEP_TIME: float = 30  # There's no reason to loop through all projects more than once every 30 minutes
+CYCLE_CHECK_TIME: float = 1   # Check for temperature and crunching once every 1 minute
+CYCLE_SAVE_TIME: float = 10   # Save database every ten minutes
 
 # Some globals we need. I try to have all globals be ALL CAPS
 FORCE_DEV_MODE = (
@@ -3705,19 +3707,21 @@ def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
     """
     log.debug("Sleeping for {}...".format(sleep_time))
     elapsed = 0
+    next_save = 0
     while elapsed < sleep_time:
         elapsed += temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
 
-        sleep(60)
+        sleep(60 * CYCLE_CHECK_TIME)
         if loop.run_until_complete(is_boinc_crunching(boinc_rpc_client)):
             if dev_loop:
-                DATABASE["DEVTIMETOTAL"] += 1
+                DATABASE["DEVTIMETOTAL"] += CYCLE_CHECK_TIME
             else:
-                DATABASE["FTMTOTAL"] += 1
+                DATABASE["FTMTOTAL"] += CYCLE_CHECK_TIME
+        elapsed += CYCLE_CHECK_TIME
         # Save database every ten minutes or at end of routine
-        if str(elapsed).endswith("0") or elapsed + 1 >= sleep_time:
+        if elapsed > CYCLE_SAVE_TIME or elapsed >= sleep_time:
             save_stats(DATABASE)
-        elapsed += 1
+            next_save += CYCLE_SAVE_TIME
 
 
 def json_default(obj) -> Dict[str, str]:
