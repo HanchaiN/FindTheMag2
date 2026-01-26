@@ -1255,14 +1255,35 @@ def temp_check() -> bool:
         try:
             found_temp = int(match.group(0))
             log.debug("Found temp {}".format(found_temp))
-            if found_temp > STOP_TEMP or found_temp < START_TEMP:
-                return False
+            return found_temp
         except Exception as e:
             print("Error parsing temp {} {}".format(match, e))
-            return True
+            return None
     else:
         print_and_log("No temps found!", "ERROR")
+    return None
+
+
+def temp_check(is_crunching: bool = True) -> bool:
+    """Checks if temperature is within acceptable limit.
+
+    Confirms if we should keep crunching based on temperature, or not.
+
+    Returns:
+        True if we should keep crunching, False otherwise.
+
+    Raises:
+        Exception: An error occured attempting to read the temperature.
+    """
+    if not ENABLE_TEMP_CONTROL:
         return True
+    temp = temp_get()
+    if temp is not None:
+        if is_crunching and temp > STOP_TEMP:
+            return False
+        if not is_crunching and temp < START_TEMP:
+            return True
+        return is_crunching
     return True
 
 
@@ -1343,7 +1364,7 @@ async def temp_sleep(
         update_table(dev_loop=dev_loop)
         await asyncio.sleep(60 * TEMP_SLEEP_TIME)
         elapsed += TEMP_SLEEP_TIME
-        if temp_check():
+        if temp_check(False):
             # Reset to initial crunching modes now that temp is satisfied
             _ = (
                 await run_rpc_command(
