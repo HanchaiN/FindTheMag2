@@ -211,7 +211,7 @@ DATABASE["TABLE_STATUS"] = (
 LAST_KNOWN_CPU_MODE = None
 LAST_KNOWN_GPU_MODE = None
 ALL_PROJECT_URLS = set()
-ALL_BOINC_PROJECTS = set()
+ALL_BOINC_PROJECTS = dict()
 ATTACHED_PROJECT_SET = set()
 ATTACHED_PROJECT_SET_DEV = set()
 COMBINED_STATS = {}
@@ -332,6 +332,7 @@ if BOINC_DATA_DIR is None:
     else:
         BOINC_DATA_DIR = "C:\\ProgramData\\BOINC\\"
 assert BOINC_DATA_DIR is not None, "BOINC_DATA_DIR is None!"
+BOINC_DATA_DIR: str = BOINC_DATA_DIR
 
 if GRIDCOIN_DATA_DIR is None:
     if FOUND_PLATFORM == "Linux":
@@ -345,6 +346,7 @@ if GRIDCOIN_DATA_DIR is None:
             Path.home(), "AppData\\Roaming\\GridcoinResearch\\"
         )
 assert GRIDCOIN_DATA_DIR is not None, "GRIDCOIN_DATA_DIR is None!"
+GRIDCOIN_DATA_DIR: str = GRIDCOIN_DATA_DIR
 
 # === Fetch update ===
 
@@ -1041,7 +1043,9 @@ async def dev_cleanup(
     attached_projects = []
     if rpc_client is None:
         try:
-            rpc_client = await setup_connection(BOINC_IP, DEV_BOINC_PASSWORD, port=DEV_RPC_PORT) # Setup dev BOINC RPC connection
+            rpc_client = await setup_connection(
+                BOINC_IP, DEV_BOINC_PASSWORD, port=DEV_RPC_PORT
+            )  # Setup dev BOINC RPC connection
         except Exception as e:
             log.error(
                 "Asked to connect to dev client in dev_cleanup but unable to: {}".format(
@@ -1262,27 +1266,19 @@ def temp_check() -> bool:
     return True
 
 
-def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> float:
-    global ENABLE_TEMP_CONTROL
+async def get_existing_modes(
+    rpc_client: libs.pyboinc.rpc_client.RPCClient,
+) -> Tuple[Union[str, None], Union[str, None]]:
     global LAST_KNOWN_CPU_MODE
     global CPU_MODE_DICT
     global LAST_KNOWN_GPU_MODE
     global GPU_MODE_DICT
-    global TEMP_SLEEP_TIME
-    global DATABASE
-
-    # If we have enabled temperature control, verify that crunching is
-    # allowed at current temp
-    if not ENABLE_TEMP_CONTROL:
-        return 0
     # Get BOINC's starting CPU and GPU modes
-    existing_mode_info = loop.run_until_complete(
-        run_rpc_command(boinc_rpc_client, "get_cc_status")
-    )
-    existing_cpu_mode: str | None = None
-    existing_gpu_mode: str | None = None
+    existing_mode_info = await run_rpc_command(rpc_client, "get_cc_status")
+    existing_cpu_mode: Union[str, None] = None
+    existing_gpu_mode: Union[str, None] = None
     if not existing_mode_info:
-        print_and_log("Error getting cc status to determine temp control", "ERROR")
+        print_and_log("Error getting cc status", "ERROR")
         if LAST_KNOWN_CPU_MODE:
             existing_cpu_mode = LAST_KNOWN_CPU_MODE
         if LAST_KNOWN_GPU_MODE:
@@ -1304,6 +1300,26 @@ def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> float:
             print_and_log(
                 "Error: Unknown gpu mode {}".format(existing_gpu_mode), "ERROR"
             )
+    return existing_cpu_mode, existing_gpu_mode
+
+
+async def temp_sleep(
+    boinc_rpc_client: libs.pyboinc.rpc_client.RPCClient, dev_loop: bool = False
+) -> float:
+    global ENABLE_TEMP_CONTROL
+    global LAST_KNOWN_CPU_MODE
+    global CPU_MODE_DICT
+    global LAST_KNOWN_GPU_MODE
+    global GPU_MODE_DICT
+    global TEMP_SLEEP_TIME
+    global DATABASE
+
+    # If we have enabled temperature control, verify that crunching is
+    # allowed at current temp
+    if not ENABLE_TEMP_CONTROL:
+        return 0
+    # Get BOINC's starting CPU and GPU modes
+    existing_cpu_mode, existing_gpu_mode = await get_existing_modes(boinc_rpc_client)
     if not existing_cpu_mode or not existing_gpu_mode:
         return 0
     # If temp is too high:
@@ -1315,23 +1331,27 @@ def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> float:
         # Put BOINC into sleep mode, automatically reverting if
         # script closes unexpectedly
         sleep_interval = str(int(((60 * TEMP_SLEEP_TIME) + 60)))
-        loop.run_until_complete(
-            run_rpc_command(boinc_rpc_client, "set_run_mode", "never", sleep_interval)
-        )
-        loop.run_until_complete(
-            run_rpc_command(boinc_rpc_client, "set_gpu_mode", "never", sleep_interval)
+        _ = (
+            await run_rpc_command(
+                boinc_rpc_client, "set_run_mode", "never", sleep_interval
+            ),
+            await run_rpc_command(
+                boinc_rpc_client, "set_gpu_mode", "never", sleep_interval
+            ),
         )
         DATABASE["TABLE_SLEEP_REASON"] = "Temperature"
         update_table(dev_loop=dev_loop)
-        sleep(60 * TEMP_SLEEP_TIME)
+        await asyncio.sleep(60 * TEMP_SLEEP_TIME)
         elapsed += TEMP_SLEEP_TIME
         if temp_check():
             # Reset to initial crunching modes now that temp is satisfied
-            loop.run_until_complete(
-                run_rpc_command(boinc_rpc_client, "set_run_mode", existing_cpu_mode)
-            )
-            loop.run_until_complete(
-                run_rpc_command(boinc_rpc_client, "set_gpu_mode", existing_gpu_mode)
+            _ = (
+                await run_rpc_command(
+                    boinc_rpc_client, "set_run_mode", existing_cpu_mode
+                ),
+                await run_rpc_command(
+                    boinc_rpc_client, "set_gpu_mode", existing_gpu_mode
+                ),
             )
             if (
                 sleep_reason := DATABASE.pop("TABLE_SLEEP_REASON", None)
@@ -1341,7 +1361,7 @@ def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> float:
             return elapsed
 
 
-def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
+async def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
     """
     A function to sleep and update the DEVTIMECOUNTER
     sleep_time: duration in minutes to sleep
@@ -1353,11 +1373,11 @@ def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
     next_temp = 0
     while elapsed < sleep_time:
         if elapsed >= next_temp:
-            temp_sleep_time = temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
+            temp_sleep_time = await temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
             elapsed += temp_sleep_time
             next_temp += temp_sleep_time + CYCLE_TEMP_TIME
-        sleep(60 * CYCLE_CHECK_TIME)
-        if loop.run_until_complete(is_boinc_crunching(boinc_rpc_client)):
+        await asyncio.sleep(60 * CYCLE_CHECK_TIME)
+        if await is_boinc_crunching(boinc_rpc_client):
             if dev_loop:
                 DATABASE["DEVTIMETOTAL"] += CYCLE_CHECK_TIME
             else:
@@ -1594,8 +1614,8 @@ def sidestake_prompt(
 def print_table(
     table_dict: Dict[str, Dict[str, str]],
     sortby: str = "GRC/DAY",
-    sleep_reason: str = DATABASE["TABLE_SLEEP_REASON"],
-    status: str = DATABASE["TABLE_STATUS"],
+    sleep_reason: Union[str, None] = DATABASE["TABLE_SLEEP_REASON"],
+    status: Union[str, None] = DATABASE["TABLE_STATUS"],
     dev_status: bool = False,
     clear: bool = False,
 ):
@@ -1683,9 +1703,9 @@ def print_table(
         if name != url:
             del working_dict[url]
         # add usd/grc/hr to each project
-        if working_dict[name].get("MAG/HR"):
-            grc_per_hour = float(working_dict[name].get("MAG/HR", 0)) / 4
-            grc_per_day = (float(working_dict[name].get("MAG/HR", 0)) / 4) * 24
+        if mag_per_hour := working_dict[name].get("MAG/HR"):
+            grc_per_hour = float(mag_per_hour) / 4
+            grc_per_day = (grc_per_hour) * 24
             rounded_grc_per_hour = str(
                 round(grc_per_hour, ROUNDING_DICT.get("GRC/HR", 3))
             )
@@ -1694,7 +1714,7 @@ def print_table(
             )
             working_dict[name]["GRC/HR"] = rounded_grc_per_hour
             working_dict[name]["GRC/DAY"] = rounded_grc_per_day
-            if float(working_dict[name].get("MAG/HR")) != 0:
+            if float(mag_per_hour) != 0:
                 revenue_per_day = (
                     (grc_per_day)
                     * DATABASE.get("GRCPRICE", 0)
@@ -1832,8 +1852,8 @@ def print_table(
 
 
 def update_table(
-    sleep_reason: str = None,
-    status: str = None,
+    sleep_reason: Union[str, None] = None,
+    status: Union[str, None] = None,
     dev_status: bool = False,
     dev_loop: bool = False,
     clear: bool = True,
@@ -1903,8 +1923,11 @@ def update_table(
 # === Main Loop ===
 
 
-def boinc_loop(
-    dev_loop: bool = False, rpc_client=None, client_rpc_client=None, time: int = 0
+async def boinc_loop(
+    dev_loop: bool = False,
+    rpc_client: Union[libs.pyboinc.rpc_client.RPCClient, None] = None,
+    client_rpc_client: Union[libs.pyboinc.rpc_client.RPCClient, None] = None,
+    time: int = 0,
 ):
     """
     Main routine which manages BOINC
@@ -1917,6 +1940,8 @@ def boinc_loop(
     # so we fallback to global BOINC rpc
     if not client_rpc_client:
         client_rpc_client = rpc_client
+    assert rpc_client is not None, "rpc_client must be provided"
+    assert client_rpc_client is not None, "client_rpc_client must be provided"
     existing_cpu_mode = None
     existing_gpu_mode = None
     # These variables are referenced outside the loop
@@ -1980,10 +2005,10 @@ def boinc_loop(
         # This is put in a try b/c sometimes it throws exceptions
         while True:
             try:
-                authorize_response = loop.run_until_complete(rpc_client.authorize())
-                temp_project_list, BOINC_PROJECT_NAMES = loop.run_until_complete(
-                    get_attached_projects(rpc_client)
-                )  # We need to re-fetch this as it's different for dev and client
+                authorize_response = await rpc_client.authorize()
+                temp_project_list, BOINC_PROJECT_NAMES = await get_attached_projects(
+                    rpc_client
+                )
                 if mode == "DEV":
                     ATTACHED_PROJECT_SET_DEV.update(temp_project_list)
                 else:
@@ -1997,7 +2022,7 @@ def boinc_loop(
                 print_and_log(
                     "Transient error connecting to BOINC, sleeping 30s: {}", "ERROR"
                 )
-                sleep(30)
+                await asyncio.sleep(30)
             else:
                 break
 
@@ -2012,6 +2037,7 @@ def boinc_loop(
             (abs(mag_fetch_delta.days) * 24 * 60) + (abs(mag_fetch_delta.seconds) / 60)
         ) > 1442:  # Only re-check mag once a day:
             if MAG_RATIO_SOURCE == "WALLET":
+                assert grc_client is not None, "GRC client must be provided"
                 MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios(
                     grc_client,
                     LOOKBACK_PERIOD,
@@ -2109,7 +2135,7 @@ def boinc_loop(
                 highest_priority_projects[0], mode
             )
         )
-        loop.run_until_complete(nnt_all_projects(rpc_client))  # NNT all projects
+        await nnt_all_projects(rpc_client)  # NNT all projects
 
         # If we haven't checked GRC prices in a while, do it
         price_check_delta = datetime.datetime.now() - DATABASE.get(
@@ -2121,10 +2147,9 @@ def boinc_loop(
         if price_check_calc > max(PRICE_CHECK_INTERVAL, 60):
             grc_price = get_grc_price()
             DATABASE["GRCPRICELASTCHECKED"] = datetime.datetime.now()
-            if grc_price:
+            if grc_price is not None:
                 DATABASE["GRCPRICE"] = grc_price
-        else:
-            grc_price = DATABASE.get("GRCPRICE", 0)
+        grc_price = DATABASE.get("GRCPRICE", 0)
 
         # If we haven't checked currency exchange rate in a while, do it
         price_check_delta = datetime.datetime.now() - DATABASE.get(
@@ -2139,10 +2164,9 @@ def boinc_loop(
             DATABASE["CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE)] = (
                 datetime.datetime.now()
             )
-            if currency_rate:
+            if currency_rate is not None:
                 DATABASE["CURRENCY_{}".format(CURRENCY_CODE)] = currency_rate
-        else:
-            currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
+        currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
         # Check profitability of all projects, if none profitable
         # (and user doesn't want unprofitable crunching), sleep for 1hr
         if ONLY_BOINC_IF_PROFITABLE and not dev_loop:
@@ -2171,19 +2195,19 @@ def boinc_loop(
                     "No projects currently profitable and no benchmarking required, sleeping for 1 hour and killing all non-started tasks"
                 )
                 try:
-                    tasks_list = loop.run_until_complete(get_task_list(rpc_client))
-                    kill_all_unstarted_tasks(rpc_client=rpc_client)
+                    tasks_list = await get_task_list(rpc_client)
+                    await kill_all_unstarted_tasks(rpc_client=rpc_client)
                 except Exception as e:
                     pass
-                loop.run_until_complete(nnt_all_projects(rpc_client))
+                await nnt_all_projects(rpc_client)
                 DATABASE["TABLE_SLEEP_REASON"] = (
                     "No profitable projects and no benchmarking required, sleeping 1 hr, killing all non-started tasks"
                 )
                 update_table(dev_loop=dev_loop)
-                sleep(60 * 60)
+                await asyncio.sleep(60 * 60)
                 continue
 
-        temp_sleep(rpc_client, dev_loop=dev_loop)
+        await temp_sleep(rpc_client, dev_loop=dev_loop)
 
         # If we are due to run under dev account, do it
         if should_crunch_for_dev(dev_loop):
@@ -2201,23 +2225,21 @@ def boinc_loop(
                 dev_rpc_client = None
                 while tries <= tries_max:
                     try:
-                        dev_rpc_client = loop.run_until_complete(
-                            setup_connection(
-                                BOINC_IP, DEV_BOINC_PASSWORD, port=DEV_RPC_PORT
-                            )
+                        dev_rpc_client = await setup_connection(
+                            BOINC_IP, DEV_BOINC_PASSWORD, port=DEV_RPC_PORT
                         )  # Setup dev BOINC RPC connection
-                        authorize_response = loop.run_until_complete(
-                            dev_rpc_client.authorize(DEV_BOINC_PASSWORD)
-                        )  # Authorize dev RPC connection
                         if not dev_rpc_client:
                             raise Exception("Error connecting to boinc dev client")
+                        authorize_response = await dev_rpc_client.authorize(
+                            DEV_BOINC_PASSWORD
+                        )  # Authorize dev RPC connection
                     except Exception as e:
                         log.error("Error connecting to BOINC dev client {}".format(e))
                     else:
                         if tries > 1:
                             log.info("Finally connected to BOINC dev client {}")
                         break
-                    sleep(30)
+                    await asyncio.sleep(30)
                     tries += 1
                     if tries > tries_max:
                         log.error("Giving up on connecting to BOINC dev client")
@@ -2228,52 +2250,27 @@ def boinc_loop(
                 # This allows for non-graceful exits of this script to not brick
                 # client's BOINC and considerations that dev account may not be
                 # crunching full time if client is actively using computer.
-                existing_mode_info = loop.run_until_complete(
-                    run_rpc_command(rpc_client, "get_cc_status")
+                existing_cpu_mode, existing_gpu_mode = await get_existing_modes(
+                    rpc_client
                 )
-                if existing_mode_info:
-                    existing_cpu_mode = existing_mode_info["task_mode"]
-                    existing_gpu_mode = str(existing_mode_info["gpu_mode"])
-                    if existing_cpu_mode in CPU_MODE_DICT:
-                        existing_cpu_mode = CPU_MODE_DICT[existing_cpu_mode]
-                        LAST_KNOWN_CPU_MODE = existing_cpu_mode
-                    else:
-                        print("Error: Unknown cpu mode {}".format(existing_cpu_mode))
-                        log.error(
-                            "Error: Unknown cpu mode {}".format(existing_cpu_mode)
-                        )
-                    if existing_gpu_mode in GPU_MODE_DICT:
-                        existing_gpu_mode = GPU_MODE_DICT[existing_gpu_mode]
-                        LAST_KNOWN_GPU_MODE = existing_gpu_mode
-                    else:
-                        print("Error: Unknown gpu mode {}".format(existing_gpu_mode))
-                        log.error(
-                            "Error: Unknown gpu mode {}".format(existing_gpu_mode)
-                        )
-                if not existing_cpu_mode:
-                    if LAST_KNOWN_CPU_MODE:
-                        existing_cpu_mode = LAST_KNOWN_CPU_MODE
-                        existing_gpu_mode = LAST_KNOWN_GPU_MODE
                 if (
                     existing_cpu_mode and existing_gpu_mode
                 ):  # We can't do this if we don't know what mode to revert back to
                     discrepancy = owed_to_dev()
                     timeout = make_discrepancy_timeout(discrepancy)
-                    loop.run_until_complete(
-                        run_rpc_command(
-                            rpc_client,
+                    _ = (
+                        await run_rpc_command(
+                            dev_rpc_client,
                             "set_run_mode",
-                            "never",
+                            "always",
                             str(timeout * 60 * 60 * 10),
-                        )
-                    )
-                    loop.run_until_complete(
-                        run_rpc_command(
-                            rpc_client,
+                        ),
+                        await run_rpc_command(
+                            dev_rpc_client,
                             "set_gpu_mode",
-                            "never",
+                            "always",
                             str(timeout * 60 * 60 * 10),
-                        )
+                        ),
                     )
                     log.info("Starting crunching under dev account, entering dev loop")
                     DATABASE["TABLE_SLEEP_REASON"] = (
@@ -2283,22 +2280,24 @@ def boinc_loop(
                     )
                     DEV_LOOP_RUNNING = True
                     update_table(dev_loop=dev_loop)
-                    boinc_loop(
+                    await boinc_loop(
                         dev_loop=True,
                         rpc_client=dev_rpc_client,
                         client_rpc_client=rpc_client,
                         time=DATABASE["DEVTIMECOUNTER"],
                     )  # Run the BOINC loop :)
-                    loop.run_until_complete(dev_cleanup(dev_rpc_client))
+                    await dev_cleanup(dev_rpc_client)
                     log.debug("dev_cleanup_called it appears boinc_loop ended")
                     update_table(dev_loop=dev_loop)
                     DEV_LOOP_RUNNING = False
                     # Re-enable client BOINC
-                    loop.run_until_complete(
-                        run_rpc_command(rpc_client, "set_gpu_mode", existing_gpu_mode)
-                    )
-                    loop.run_until_complete(
-                        run_rpc_command(rpc_client, "set_run_mode", existing_cpu_mode)
+                    _ = (
+                        await run_rpc_command(
+                            rpc_client, "set_run_mode", existing_cpu_mode
+                        ),
+                        await run_rpc_command(
+                            rpc_client, "set_gpu_mode", existing_gpu_mode
+                        ),
                     )
                 else:
                     log.error("Unable to start dev mode due to unknown last mode")
@@ -2310,21 +2309,19 @@ def boinc_loop(
             project_loop = DEV_PROJECT_WEIGHTS
             # Re-up suspend on main client
             timeout = make_discrepancy_timeout(discrepancy)
-            loop.run_until_complete(
-                run_rpc_command(
+            _ = (
+                await run_rpc_command(
                     client_rpc_client,
                     "set_run_mode",
                     "never",
                     str(timeout * 60 * 60 * 10),
-                )
-            )
-            loop.run_until_complete(
-                run_rpc_command(
+                ),
+                await run_rpc_command(
                     client_rpc_client,
                     "set_gpu_mode",
                     "never",
                     str(timeout * 60 * 60 * 10),
-                )
+                ),
             )
 
         else:
@@ -2429,13 +2426,15 @@ def boinc_loop(
             DATABASE["TABLE_STATUS"] = "Waiting for xfers to complete.."
             update_table(dev_loop=dev_loop)
             log.info("Waiting for any xfers to complete...")
-            dl_response = loop.run_until_complete(
-                wait_till_no_xfers(rpc_client)
+            dl_response = await wait_till_no_xfers(
+                rpc_client=rpc_client
             )  # Wait until all network activity has concluded
+            if not dl_response:
+                log.info("Timeout waiting for xfers to complete, proceeding anyway")
             # If in dev_loop, attach to project if needed
             if dev_loop:
-                get_project_list = loop.run_until_complete(
-                    run_rpc_command(rpc_client, "get_project_status")
+                get_project_list = await run_rpc_command(
+                    rpc_client, "get_project_status"
                 )
 
                 # On first run, there is no project list
@@ -2479,22 +2478,20 @@ def boinc_loop(
                         continue
                     else:
                         log.info("Attaching dev account to {}".format(boincified_url))
-                        attach_response = loop.run_until_complete(
-                            run_rpc_command(
-                                rpc_client,
-                                "project_attach",
-                                arg1="project_url",
-                                arg1_val=boincified_url,
-                                arg2="authenticator",
-                                arg2_val=DEV_PROJECT_DICT[database_url],
-                            )
+                        attach_response = await run_rpc_command(
+                            rpc_client,
+                            "project_attach",
+                            arg1="project_url",
+                            arg1_val=boincified_url,
+                            arg2="authenticator",
+                            arg2_val=DEV_PROJECT_DICT[database_url],
                         )  # Update project
-                        sleep(60)  # give it a chance to finish attaching
+                        await asyncio.sleep(60)  # give it a chance to finish attaching
                         (
                             temp_project_list,
                             BOINC_PROJECT_NAMES,
-                        ) = loop.run_until_complete(
-                            get_attached_projects(rpc_client)
+                        ) = await get_attached_projects(
+                            rpc_client
                         )  # We need to re-fetch this as it's now changed
                         ATTACHED_PROJECT_SET.update(temp_project_list)
                         boincified_url = resolve_url_boinc_rpc(
@@ -2520,15 +2517,11 @@ def boinc_loop(
                 "Allowing new tasks and updating {}".format(highest_priority_project)
             )
             update_table(dev_loop=dev_loop)
-            allow_response = loop.run_until_complete(
-                run_rpc_command(
-                    rpc_client, "project_allowmorework", "project_url", boincified_url
-                )
+            allow_response = await run_rpc_command(
+                rpc_client, "project_allowmorework", "project_url", boincified_url
             )
-            update_response = loop.run_until_complete(
-                run_rpc_command(
-                    rpc_client, "project_update", "project_url", boincified_url
-                )
+            update_response = await run_rpc_command(
+                rpc_client, "project_update", "project_url", boincified_url
             )  # Update project
             log.debug("Requesting work from {}".format(boincified_url))
             log.debug(
@@ -2536,14 +2529,14 @@ def boinc_loop(
             )  # added to debug no new tasks bug
             # Give BOINC time to update w project, I don't know a less hacky way to
             # do this, suggestions are welcome
-            sleep(15)
+            await asyncio.sleep(15)
             DATABASE[mode][database_url]["LAST_CHECKED"] = datetime.datetime.now()
             # Check if project should be backed off. If so, back it off.
             # This is an exponentially increasing backoff with a maximum time of 1 day
             # Projects are backed off if they request it, if they are
             # unresponsive/down, or if no work is available
-            backoff_response = loop.run_until_complete(
-                check_log_entries_for_backoff(rpc_client, project_name=project_name)
+            backoff_response = await check_log_entries_for_backoff(
+                rpc_client, project_name=project_name
             )
             if backoff_response:
                 if DATABASE[mode][database_url].get("BACKOFF"):
@@ -2555,19 +2548,17 @@ def boinc_loop(
             else:
                 DATABASE[mode][database_url]["BACKOFF"] = 0
                 log.debug("Waiting for any xfers to complete...")
-                dl_response = wait_till_no_xfers(
+                dl_response = await wait_till_no_xfers(
                     rpc_client
                 )  # Wait until all network activity has concluded
+                if not dl_response:
+                    log.info("Timeout waiting for xfers to complete, proceeding anyway")
 
             # Re-NNT all projects
-            nnt_response = loop.run_until_complete(
-                nnt_all_projects(rpc_client)
-            )  # NNT all projects
+            nnt_response = await nnt_all_projects(rpc_client)  # NNT all projects
 
             # Check logs to see if both work caches are full
-            cache_full = loop.run_until_complete(
-                check_log_entries(rpc_client, project_name=project_name)
-            )
+            cache_full = await check_log_entries(rpc_client, project_name=project_name)
             log.debug("checking log response for work cache status....")
 
             # If BOINC job cache is full, stop asking projects for work
@@ -2587,13 +2578,11 @@ def boinc_loop(
             known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
             known_boinc_projects=ALL_PROJECT_URLS,
         )
-        allow_response = loop.run_until_complete(
-            run_rpc_command(
-                rpc_client, "project_allowmorework", "project_url", allow_this_project
-            )
+        allow_response = await run_rpc_command(
+            rpc_client, "project_allowmorework", "project_url", allow_this_project
         )
         # There's no reason to loop through all projects too often.
-        custom_sleep(CYCLE_SLEEP_TIME, rpc_client, dev_loop=dev_loop)
+        await custom_sleep(CYCLE_SLEEP_TIME, rpc_client, dev_loop=dev_loop)
 
 
 def main():
@@ -2885,7 +2874,7 @@ def main():
                                 choice(ascii_uppercase + ascii_lowercase + digits)
                                 for i in range(12)
                             )
-                            rpc_port = 9876
+                            rpc_port = "9876"
                             print("Your RPC username is: " + rpc_user)
                             print("Your RPC password is: " + gridcoin_rpc_password)
                             print("You don't need to remember these.")
@@ -3016,6 +3005,7 @@ def main():
                     input("Press enter to exit")
                 sys.exit(1)
         else:
+            assert gridcoin_conf is not None
             MAG_RATIO_SOURCE = "WALLET"
             # Check sidestakes, prompt user to enable them if they don't exist
             CHECK_SIDESTAKE_RESULTS = check_sidestake(
@@ -3212,7 +3202,7 @@ def main():
         # While we don't have enough tasks, continue cycling through project list and
         # updating. If we have cycled through all projects, get_highest_priority_project
         # will stall to prevent requesting too often
-        boinc_loop(False, rpc_client)
+        loop.run_until_complete(boinc_loop(False, rpc_client))
     # Restore user prefs
     safe_exit(None, None)
 

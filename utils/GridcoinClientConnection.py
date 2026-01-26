@@ -16,7 +16,7 @@ from requests.auth import HTTPBasicAuth
 
 import json
 from time import sleep
-from typing import Callable, List, Union, Dict
+from typing import Callable, List, Mapping, Union, Dict
 import os
 from utils.utils import print_and_log as _print_and_log
 
@@ -230,7 +230,7 @@ def get_gridcoin_config_parameters(gridcoin_dir: str) -> Dict[str, str]:
 
 
 def check_sidestake(
-    config_params: Dict[str, Union[str, List[str]]], address: str, minval: float
+    config_params: Mapping[str, Union[str, List[str]]], address: str, minval: float
 ) -> bool:
     """Confirms whether or not the given address is being adequately sidestaked.
 

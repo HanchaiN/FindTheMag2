@@ -68,7 +68,7 @@ async def run_rpc_command(
     arg1_val: Union[str, None] = None,
     arg2: Union[str, None] = None,
     arg2_val: Union[str, None] = None,
-) -> Union[str, Dict[Any, Any], List[Any]]:
+) -> Union[str, Dict[Any, Any], List[Any], None]:
     """Send command to BOINC client via RPC
 
     Runs command on BOINC client via RPC
@@ -125,6 +125,7 @@ async def run_rpc_command(
             continue
         else:
             return parsed
+    return None
 
 
 async def get_task_list(rpc_client: RPCClient) -> list:
@@ -268,7 +269,7 @@ def xfers_happening(xfer_list: list) -> bool:
         for xfer in xfer_list:
             if stuck_xfer(xfer):  # ignore stuck xfers
                 continue
-            if str(xfer["status"]) == "0":
+            if str(xfer.get("status", "")) == "0":
                 return True
             else:
                 log.warning("Found xfer with unknown status: " + str(xfer))
@@ -278,7 +279,7 @@ def xfers_happening(xfer_list: list) -> bool:
     return False
 
 
-async def wait_till_no_xfers(rpc_client: RPCClient) -> None:
+async def wait_till_no_xfers(rpc_client: RPCClient) -> bool:
     """Wait on BOINC client to finish all pending transfers.
 
     Wait for BOINC to finish all pending xfers, return None when done
@@ -314,13 +315,14 @@ async def wait_till_no_xfers(rpc_client: RPCClient) -> None:
         if isinstance(allow_response, str):
             cleaned_response = re.sub(r"\s*", "", allow_response)
             if cleaned_response == "":  # There are no transfers, yay!
-                return
+                return True
         if xfers_happening(allow_response):
             log.debug("xfers happening: {}".format(str(allow_response)))
             await asyncio.sleep(loop_wait_in_seconds)
             continue
         else:
-            return
+            return True
+    return False
 
 
 async def kill_all_unstarted_tasks(
@@ -849,7 +851,7 @@ async def get_all_projects(
 
 async def get_attached_projects(
     rpc_client: RPCClient,
-) -> Union[Tuple[List[str], Dict[str, str]], Tuple[None, None]]:
+) -> Tuple[List[str], Dict[str, str]]:
     try:
         project_status_reply = await rpc_client.get_project_status()
         found_projects = []
@@ -866,7 +868,7 @@ async def get_attached_projects(
         return found_projects, project_names
     except Exception as e:
         log.error("Error in get_attached_projects {}".format(e))
-        return None, None
+        return [], {}
 
 
 async def verify_boinc_connection(
