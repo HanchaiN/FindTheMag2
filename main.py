@@ -107,8 +107,9 @@ EXIT_NNT: bool | None = None
 STAT_FILE: str = "stats.json"
 JOURNALD_NAME: str | None = None
 CYCLE_SLEEP_TIME: float = 30  # There's no reason to loop through all projects more than once every 30 minutes
-CYCLE_CHECK_TIME: float = 1   # Check for temperature and crunching once every 1 minute
+CYCLE_CHECK_TIME: float = 1   # Check for crunching once every 1 minute
 CYCLE_SAVE_TIME: float = 10   # Save database every ten minutes
+CYCLE_TEMP_TIME: float = 10   # Check for temperature once every ten minutes
 
 # Some globals we need. I try to have all globals be ALL CAPS
 FORCE_DEV_MODE = (
@@ -685,8 +686,13 @@ def safe_exit(arg1, arg2) -> None:
             print(
                 "Note that you will need to restart your machine for these changes to take effect"
             )
-        else:
+    else:
+        try:
             os.remove(override_dest_path)
+        except Exception as e:
+            print_and_log(
+                "Error removing overritten BOINC preferences {}".format(e), "WARN"
+            )
 
     rpc_client = None
     try:
@@ -2060,7 +2066,7 @@ def get_most_mag_efficient_projects(
                 )
             )
         log.info(
-            "\n\nHighest mag/hr project //with at least 10 completed WUs// is {} w/ {}/hr of credit.".format(
+            "Highest mag/hr project //with at least 10 completed WUs// is {} w/ {}/hr of credit.".format(
                 highest_project,
                 combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPERHOUR"],
             )
@@ -3708,9 +3714,12 @@ def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
     log.debug("Sleeping for {}...".format(sleep_time))
     elapsed = 0
     next_save = 0
+    next_temp = 0
     while elapsed < sleep_time:
-        elapsed += temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
-
+        if elapsed >= next_temp:
+            temp_sleep_time = temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
+            elapsed += temp_sleep_time
+            next_temp += temp_sleep_time + CYCLE_TEMP_TIME
         sleep(60 * CYCLE_CHECK_TIME)
         if loop.run_until_complete(is_boinc_crunching(boinc_rpc_client)):
             if dev_loop:
@@ -3718,10 +3727,12 @@ def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
             else:
                 DATABASE["FTMTOTAL"] += CYCLE_CHECK_TIME
         elapsed += CYCLE_CHECK_TIME
-        # Save database every ten minutes or at end of routine
-        if elapsed > CYCLE_SAVE_TIME or elapsed >= sleep_time:
+        # Save database every ten minutes
+        if elapsed >= next_save:
             save_stats(DATABASE)
             next_save += CYCLE_SAVE_TIME
+    # Save database at end of routine
+    save_stats(DATABASE)
 
 
 def json_default(obj) -> Dict[str, str]:
@@ -4565,10 +4576,9 @@ def boinc_loop(
                 )
             )  # Update project
             log.debug(
-                "Requesting work from {} added to debug no new tasks bug"
-                + str(boincified_url)
+                "Requesting work from {}".format(boincified_url)
             )
-            log.debug("Update response is {}".format(update_response))
+            log.debug("Update response is {}".format(update_response))  # added to debug no new tasks bug
             # Give BOINC time to update w project, I don't know a less hacky way to
             # do this, suggestions are welcome
             sleep(15)
@@ -5213,6 +5223,14 @@ if __name__ == "__main__":
                     e
                 )
             )
+            try:
+                os.remove(override_dest_path)
+            except Exception as e:
+                log.info(
+                    "global_prefs_override_backup.xml does not appear to exist. This is expected. Error: {}".format(
+                        e
+                    )
+                )
 
         verification_result = loop.run_until_complete(
             verify_boinc_connection(rpc_client)
