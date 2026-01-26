@@ -75,7 +75,7 @@ def parse_grc_price_soup(url: str, price_soup: str) -> Tuple[Union[float, None],
     return float_price, url_message, info_message
 
 
-def get_grc_price_from_sites(proxies: Union[Dict[str, str]] = None) -> Tuple[Union[float, None], str, List[str], List[str], List[str]]:
+def get_grc_price_from_sites(proxies: Union[Dict[str, str], None] = None) -> Tuple[Union[float, None], str, List[str], List[str], List[str]]:
     headers = requests.utils.default_headers()
     headers["User-Agent"] = random.choice(AGENTS)
     found_prices = []

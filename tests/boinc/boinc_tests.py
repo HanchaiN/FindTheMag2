@@ -4,6 +4,7 @@ import datetime
 
 import pytest
 
+import utils.BoincClientConnection as BoincClientConnection
 import config
 import main, asyncio
 import libs.pyboinc
@@ -11,7 +12,7 @@ import libs.pyboinc
 rpc_user = None
 rpc_port = None
 rpc_password = None
-CONNECTION_OBJECT: main.BoincClientConnection = None
+CONNECTION_OBJECT: BoincClientConnection.BoincClientConnection = None
 RPC_CONNECTION_OBJECT: libs.pyboinc.rpc_client.RPCClient = None
 loop = asyncio.get_event_loop()
 BOINC_DATA_DIR = main.BOINC_DATA_DIR
@@ -21,7 +22,9 @@ BOINC_DATA_DIR = main.BOINC_DATA_DIR
 @pytest.fixture
 def test_BoincClientConnection():
     global CONNECTION_OBJECT
-    CONNECTION_OBJECT = main.BoincClientConnection(config_dir=BOINC_DATA_DIR)
+    CONNECTION_OBJECT = BoincClientConnection.BoincClientConnection(
+        config_dir=BOINC_DATA_DIR
+    )
     assert CONNECTION_OBJECT
 
 
@@ -29,7 +32,9 @@ def test_BoincClientConnection():
 def test_setup_connection():
     global RPC_CONNECTION_OBJECT
     RPC_CONNECTION_OBJECT = loop.run_until_complete(
-        main.setup_connection(config.BOINC_IP, config.BOINC_PASSWORD, config.BOINC_PORT)
+        BoincClientConnection.setup_connection(
+            config.BOINC_IP, config.BOINC_PASSWORD, config.BOINC_PORT
+        )
     )
     assert isinstance(RPC_CONNECTION_OBJECT, libs.pyboinc.rpc_client.RPCClient)
 
@@ -41,14 +46,16 @@ def test_BoincClientConnection_get_project_list(test_BoincClientConnection):
 
 
 def test_get_all_projects(test_setup_connection):
-    result = loop.run_until_complete(main.get_all_projects(RPC_CONNECTION_OBJECT))
+    result = loop.run_until_complete(
+        BoincClientConnection.get_all_projects(RPC_CONNECTION_OBJECT)
+    )
     assert "https://einstein.phys.uwm.edu/" in result
     assert len(result) > 10
 
 
 def test_get_attached_projects(test_setup_connection):
     result1, result2 = loop.run_until_complete(
-        main.get_attached_projects(RPC_CONNECTION_OBJECT)
+        BoincClientConnection.get_attached_projects(RPC_CONNECTION_OBJECT)
     )
     assert isinstance(result1, list)
     assert isinstance(result2, dict)
@@ -62,7 +69,7 @@ def test_get_attached_projects(test_setup_connection):
 
 def test_verify_boinc_connection(test_setup_connection):
     result1 = loop.run_until_complete(
-        main.verify_boinc_connection(RPC_CONNECTION_OBJECT)
+        BoincClientConnection.verify_boinc_connection(RPC_CONNECTION_OBJECT)
     )
     assert result1
 
@@ -78,7 +85,15 @@ def test_prefs_check(test_setup_connection):
         "net_end_hour": 0,
     }
     result1 = loop.run_until_complete(
-        main.prefs_check(RPC_CONNECTION_OBJECT, global_prefs, disk_usage, True)
+        BoincClientConnection.prefs_check(
+            RPC_CONNECTION_OBJECT,
+            global_prefs,
+            disk_usage,
+            main.MIN_GB,
+            main.EXPECTED_GB_USED,
+            main.SCRIPTED_RUN,
+            True,
+        )
     )
     assert result1
     # Disk usage allowed too low
@@ -91,7 +106,15 @@ def test_prefs_check(test_setup_connection):
         "net_end_hour": 0,
     }
     result1 = loop.run_until_complete(
-        main.prefs_check(RPC_CONNECTION_OBJECT, global_prefs, disk_usage, True)
+        BoincClientConnection.prefs_check(
+            RPC_CONNECTION_OBJECT,
+            global_prefs,
+            disk_usage,
+            main.MIN_GB,
+            main.EXPECTED_GB_USED,
+            main.SCRIPTED_RUN,
+            True,
+        )
     )
     assert not result1
     disk_usage = {
@@ -103,7 +126,15 @@ def test_prefs_check(test_setup_connection):
         "net_end_hour": 0,
     }
     result1 = loop.run_until_complete(
-        main.prefs_check(RPC_CONNECTION_OBJECT, global_prefs, disk_usage, True)
+        BoincClientConnection.prefs_check(
+            RPC_CONNECTION_OBJECT,
+            global_prefs,
+            disk_usage,
+            main.MIN_GB,
+            main.EXPECTED_GB_USED,
+            main.SCRIPTED_RUN,
+            True,
+        )
     )
     assert not result1
     # Not allowed constant network access
@@ -116,6 +147,14 @@ def test_prefs_check(test_setup_connection):
         "net_end_hour": 0,
     }
     result1 = loop.run_until_complete(
-        main.prefs_check(RPC_CONNECTION_OBJECT, global_prefs, disk_usage, True)
+        BoincClientConnection.prefs_check(
+            RPC_CONNECTION_OBJECT,
+            global_prefs,
+            disk_usage,
+            main.MIN_GB,
+            main.EXPECTED_GB_USED,
+            main.SCRIPTED_RUN,
+            True,
+        )
     )
     assert not result1

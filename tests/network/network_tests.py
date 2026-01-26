@@ -1,6 +1,6 @@
 import pytest
 import main
-import grc_price_utils
+import utils.grc_price_utils as grc_price_utils
 from typing import Dict,List,Tuple,Union,Any
 # Tests that require a network connection and will fail without one
 APPROVED_PROJECT_URLS={}

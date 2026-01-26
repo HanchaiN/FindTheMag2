@@ -1,12 +1,16 @@
 import os
 import sys
 
-sys.path.append(os.getcwd() + '/..')
+import utils.BoincClientConnection as BoincClientConnection
+import utils.StatsHelper as StatsHelper
+import utils.utils as utils
+
+sys.path.append(os.getcwd() + "/..")
 
 import json
 
 from soups import SOUP_DICTIONARY
-from grc_price_utils import parse_grc_price_soup
+from utils.grc_price_utils import parse_grc_price_soup
 
 import main, datetime
 from typing import Dict, List
@@ -55,13 +59,13 @@ def test_combine_dicts():
     dict1 = {"A": "1"}
     dict2 = {"B": "1"}
     # verify dicts being combined
-    main.combine_dicts(dict1, dict2)
+    utils.combine_dicts(dict1, dict2)
     assert dict1["B"] == "1"
     assert dict1["A"] == "1"
     # verify dict2 is taking precedent
     dict1 = {"A": "1"}
     dict2 = {"A": "2"}
-    main.combine_dicts(dict1, dict2)
+    utils.combine_dicts(dict1, dict2)
     assert dict1["A"] == "2"
 
 
@@ -113,26 +117,29 @@ def test_resolve_url_boinc_rpc():
 
 def test_resolve_url_database():
     assert (
-        main.resolve_url_database("https://www.boinc.com/myproject")
+        utils.resolve_url_database("https://www.boinc.com/myproject")
         == "BOINC.COM/MYPROJECT"
     )
     assert (
-        main.resolve_url_database("http://www.boinc.com/myproject")
-        == "BOINC.COM/MYPROJECT"
-    )
-    assert main.resolve_url_database("www.boinc.com/myproject") == "BOINC.COM/MYPROJECT"
-    assert (
-        main.resolve_url_database("https://boinc.com/myproject")
+        utils.resolve_url_database("http://www.boinc.com/myproject")
         == "BOINC.COM/MYPROJECT"
     )
     assert (
-        main.resolve_url_database("http://boinc.com/myproject") == "BOINC.COM/MYPROJECT"
+        utils.resolve_url_database("www.boinc.com/myproject") == "BOINC.COM/MYPROJECT"
+    )
+    assert (
+        utils.resolve_url_database("https://boinc.com/myproject")
+        == "BOINC.COM/MYPROJECT"
+    )
+    assert (
+        utils.resolve_url_database("http://boinc.com/myproject")
+        == "BOINC.COM/MYPROJECT"
     )
 
 
 def test_resolve_url_list_to_database():
     url_list = ["https://www.boinc.com/myproject", "http://boinc.com/myproject"]
-    assert main.resolve_url_list_to_database(url_list) == [
+    assert utils.resolve_url_list_to_database(url_list) == [
         "BOINC.COM/MYPROJECT",
         "BOINC.COM/MYPROJECT",
     ]
@@ -308,34 +315,38 @@ def test_check_sidestake():
 
 def test_project_url_from_stats_file():
     assert (
-        main.project_url_from_stats_file("job_log_www.worldcommunitygrid.org.txt")
+        StatsHelper.project_url_from_stats_file(
+            "job_log_www.worldcommunitygrid.org.txt"
+        )
         == "WORLDCOMMUNITYGRID.ORG"
     )
     assert (
-        main.project_url_from_stats_file("job_log_escatter11.fullerton.edu_nfs.txt")
+        StatsHelper.project_url_from_stats_file(
+            "job_log_escatter11.fullerton.edu_nfs.txt"
+        )
         == "ESCATTER11.FULLERTON.EDU/NFS"
     )
     assert (
-        main.project_url_from_stats_file("job_log_www.rechenkraft.net_yoyo.txt")
+        StatsHelper.project_url_from_stats_file("job_log_www.rechenkraft.net_yoyo.txt")
         == "RECHENKRAFT.NET/YOYO"
     )
 
 
 def test_project_url_from_credit_history_file():
     assert (
-        main.project_url_from_credit_history_file(
+        StatsHelper.project_url_from_credit_history_file(
             "statistics_boinc.multi-pool.info_latinsquares.xml"
         )
         == "BOINC.MULTI-POOL.INFO/LATINSQUARES"
     )
     assert (
-        main.project_url_from_credit_history_file(
+        StatsHelper.project_url_from_credit_history_file(
             "statistics_boinc.bakerlab.org_rosetta.xml"
         )
         == "BOINC.BAKERLAB.ORG/ROSETTA"
     )
     assert (
-        main.project_url_from_credit_history_file(
+        StatsHelper.project_url_from_credit_history_file(
             "statistics_milkyway.cs.rpi.edu_milkyway.xml"
         )
         == "MILKYWAY.CS.RPI.EDU/MILKYWAY"
@@ -347,7 +358,7 @@ def test_stat_file_to_list():
 1680334604 ue 4017.278236 ct 3805.396000 fe 200000000000000 nm TASK2 et 3819.634777 es 0
 1680336346 ue 2381.072619 ct 2074.329000 fe 70000000000000 nm TASK3 et 2094.352010 es 0
 1680337549 ue 3190.839339 ct 2930.237000 fe 70000000000000 nm TASK4 et 2944.508444 es 0"""
-    result = main.stat_file_to_list(None, example)
+    result = StatsHelper.stat_file_to_list(None, example)
     assert result == [
         {
             "STARTTIME": "1680334251",
@@ -445,7 +456,7 @@ def test_calculate_credit_averages():
             "COMPILED_STATS": {},
         },
     }
-    result = main.calculate_credit_averages(my_input)
+    result = StatsHelper.calculate_credit_averages(my_input)
     assert result == {
         "WORLDCOMMUNITYGRID.ORG": {
             "TOTALCREDIT": 0.0,
@@ -506,8 +517,8 @@ def test_calculate_credit_averages():
 
 
 def test_config_files_to_stats():
-    assert main.config_files_to_stats("/path/that/doesntexist") == {}
-    result = main.config_files_to_stats("boinc_stats")
+    assert StatsHelper.config_files_to_stats("/path/that/doesntexist") == {}
+    result = StatsHelper.config_files_to_stats("boinc_stats")
     expected = {
         "WORLDCOMMUNITYGRID.ORG": {
             "CREDIT_HISTORY": {"04-07-2023": {"CREDITAWARDED": 0.0}},
@@ -620,7 +631,7 @@ def test_config_files_to_stats():
 def test_add_mag_to_combined_stats():
     expected = {}
     result = {}
-    combined_stats = main.config_files_to_stats("boinc_stats_2")
+    combined_stats = StatsHelper.config_files_to_stats("boinc_stats_2")
     example_ratios = {
         "WORLDCOMMUNITYGRID.ORG": 0.01,
         "SECH.ME/BOINC/AMICABLE": 0.99,
@@ -630,7 +641,7 @@ def test_add_mag_to_combined_stats():
     approved_projects.remove(
         "ESCATTER11.FULLERTON.EDU/NFS"
     )  # test it gives zero mag for unapproved project
-    return1, return2 = main.add_mag_to_combined_stats(
+    return1, return2 = StatsHelper.add_mag_to_combined_stats(
         combined_stats, example_ratios, approved_projects, preferred_projects=[]
     )
     expected_return_1 = {
@@ -933,13 +944,13 @@ def test_get_most_mag_efficient_projects():
     percentdiff = 10
     quiet: bool = True
     # test that it finds two highest projects w/ percentdiff, and that it's properly ignoring projects
-    result = main.get_most_mag_efficient_projects(
+    result = StatsHelper.get_most_mag_efficient_projects(
         combinedstats, ignored_projects, percentdiff, quiet
     )
     assert result == ["WORLDCOMMUNITYGRID.ORG", "RECHENKRAFT.NET/YOYO"]
     # test that percentdiff is working
     percentdiff = 1
-    result = main.get_most_mag_efficient_projects(
+    result = StatsHelper.get_most_mag_efficient_projects(
         combinedstats, ignored_projects, percentdiff, quiet
     )
     assert result == ["WORLDCOMMUNITYGRID.ORG"]
@@ -953,12 +964,12 @@ def test_get_first_non_ignored_project():
     ]
     ignored_projects = ["RECHENKRAFT.NET/YOYO"]
     assert (
-        main.get_first_non_ignored_project(project_list, ignored_projects)
+        StatsHelper.get_first_non_ignored_project(project_list, ignored_projects)
         == "WORLDCOMMUNITYGRID.ORG"
     )
     ignored_projects = ["RECHENKRAFT.NET/YOYO", "WORLDCOMMUNITYGRID.ORG"]
     assert (
-        main.get_first_non_ignored_project(project_list, ignored_projects)
+        StatsHelper.get_first_non_ignored_project(project_list, ignored_projects)
         == "BOINC.MULTI-POOL.INFO/LATINSQUARES"
     )
 
@@ -1151,16 +1162,16 @@ def test_left_align():
     total_len = 10
     # test padding of one
     min_pad = 1
-    result = main.left_align(my_string, total_len, min_pad)
+    result = utils.left_align(my_string, total_len, min_pad)
     assert result == "test      "
     # test padding of zero
     min_pad = 0
-    result = main.left_align(my_string, total_len, min_pad)
+    result = utils.left_align(my_string, total_len, min_pad)
     assert result == "test      "
     # test padding > total_len
     total_len = 5
     min_pad = 2
-    result = main.left_align(my_string, total_len, min_pad)
+    result = utils.left_align(my_string, total_len, min_pad)
     assert result == "tes  "
 
 
@@ -1169,22 +1180,24 @@ def test_center_align():
     total_len = 10
     # test padding of one
     min_pad = 1
-    result = main.center_align(my_string, total_len, min_pad)
+    result = utils.center_align(my_string, total_len, min_pad)
     assert result == "   test   "
     # test string+pad>total_len
     total_len = 9
     min_pad = 3
-    result = main.center_align(my_string, total_len, min_pad)
+    result = utils.center_align(my_string, total_len, min_pad)
     assert result == "   tes   "
     # test padding > total_len
     total_len = 6
     min_pad = 3
-    result = main.center_align(my_string, total_len, min_pad)
+    result = utils.center_align(my_string, total_len, min_pad)
     assert result == "      "
 
 
 def test_ignore_message_from_check_log_entries():
-    assert main.ignore_message_from_check_log_entries("WORK FETCH SUSPENDED BY USERS")
+    assert BoincClientConnection.ignore_message_from_check_log_entries(
+        "WORK FETCH SUSPENDED BY USERS"
+    )
 
 
 def make_fake_boinc_log_entry(
@@ -1208,7 +1221,7 @@ def test_cache_full():
         "testproject: GPUS NOT USABLE",
     ]
     test_messages = make_fake_boinc_log_entry(messages, "testproject")
-    assert main.cache_full("testproject", test_messages)
+    assert BoincClientConnection.cache_full("testproject", test_messages)
     # make sure it's not counting other projects
     messages = [
         "testproject CPU: JOB CACHE FULL",
@@ -1217,20 +1230,20 @@ def test_cache_full():
         "testproject: GPUS NOT USABLE",
     ]
     test_messages = make_fake_boinc_log_entry(messages, "testproject")
-    assert not main.cache_full("anotherproject", test_messages)
+    assert not BoincClientConnection.cache_full("anotherproject", test_messages)
     # check it realizes cpu is full on system w no gpu
     messages = ["NOT REQUESTING TASKS: DON'T NEED ()", "CPU: JOB CACHE FULL"]
     test_messages = make_fake_boinc_log_entry(messages, "testproject")
-    assert main.cache_full("testproject", test_messages)
+    assert BoincClientConnection.cache_full("testproject", test_messages)
 
 
 def test_project_backoff():
     messages = ["PROJECT HAS NO TASKS AVAILABLE", "SCHEDULER REQUEST FAILED"]
     test_messages = make_fake_boinc_log_entry(messages, "testproject")
-    assert main.project_backoff("testproject", test_messages)
+    assert BoincClientConnection.project_backoff("testproject", test_messages)
     messages = ["NOT REQUESTING TASKS: DON'T NEED", "STARTED DOWNLOAD"]
     test_messages = make_fake_boinc_log_entry(messages, "testproject")
-    assert not main.project_backoff("testproject", test_messages)
+    assert not BoincClientConnection.project_backoff("testproject", test_messages)
 
 
 def test_get_project_mag_ratios_from_response():
@@ -1364,7 +1377,7 @@ def test_owed_to_dev():
 
 def test_date_to_date():
     original_date = "06-26-2023"
-    converted = main.date_to_date(original_date)
+    converted = utils.date_to_date(original_date)
     assert converted.year == 2023
     assert converted.month == 6
     assert converted.day == 26
@@ -1405,13 +1418,13 @@ def test_stuck_xfer():
 
 
 def test_json_default():
-    return_dict = main.json_default(datetime.datetime.now())
+    return_dict = utils.json_default(datetime.datetime.now())
     assert isinstance(return_dict, dict)
 
 
 def test_object_hook():
-    return_dict = main.json_default(datetime.datetime.now())
-    result = main.object_hook(return_dict)
+    return_dict = utils.json_default(datetime.datetime.now())
+    result = utils.object_hook(return_dict)
     assert isinstance(result, datetime.datetime)
 
 

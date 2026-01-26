@@ -1,12 +1,13 @@
 # Tests for functions which communicate with Gridcoin wallet. These will obviously fail if wallet is not online.
 # These tests will also fail if there is no user/pass/port in your gridcoin.conf
 import pytest
+import utils.GridcoinClientConnection as GridcoinClientConnection
 import main
 
 rpc_user = None
 rpc_port = None
 rpc_password = None
-connection_object: main.GridcoinClientConnection = None
+connection_object: GridcoinClientConnection.GridcoinClientConnection = None
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def test_get_gridcoin_config_parameters():
 @pytest.fixture
 def test_GridcoinClientConnection(test_get_gridcoin_config_parameters):
     global connection_object
-    connection_object = main.GridcoinClientConnection(
+    connection_object = GridcoinClientConnection.GridcoinClientConnection(
         rpc_user=rpc_user, rpc_port=rpc_port, rpc_password=rpc_password
     )
     assert connection_object

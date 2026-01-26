@@ -53,11 +53,11 @@ SKIP_TABLE_UPDATES: bool = False  # If true, don't print table updates. Useful f
 ENABLE_TEMP_CONTROL = False  # Enable controlling BOINC based on temp. Default: False
 START_TEMP = 65  # Start crunching if temp > this number, whole numbers only! Default: 65.
 STOP_TEMP = 75  # Stop crunching is temp > this number, whole numbers only! Default: 75
+TEMP_SLEEP_TIME = 10  # If we should stop crunching due to temp, sleep this many minutes before checking again. Default: 10
 # Methods of fetching temp data, only use one!
 TEMP_URL = None  # URL to fetch temperature data from, Default: None. # Note this will check temperature quite frequently. This is fine for your smart thermostats on a local IP but not great for publicly-accesible data points. Example: 'https://mytempcheck.com'
 TEMP_COMMAND = None  # Shell command to run to check temp data. Must use absolute paths ie '/bin/bash /home/user/tempcheck.sh'.
 TEMP_REGEX = r"\d*"  # Regular expression used to scrape temp from command, URL, or other specified source. This just grabs the first sequence of numbers it finds. Default: r'\d*'. Examples: https://www.dataquest.io/blog/regex-cheatsheet/
-TEMP_SLEEP_TIME = 10  # If we should stop crunching due to temp, sleep this many minutes before checking again. Default: 10
 
 
 # If you want to write a custom function to retrieve temperature information, put it here. It must return a string value such as '70' or None
@@ -102,6 +102,9 @@ GRIDCOIN_DATA_DIR = None  # Example: '/home/user/.GridcoinResearch' or 'C:\\User
 STRICT_GRIDCOIN = False
 RECALCULATE_STATS_INTERVAL = 60  # Interval in minutes to re-calculate stats. Default: 60
 PRICE_CHECK_INTERVAL = 1440  # how often to check GRC price in minutes, minimum delay of 60 minutes between checks. Default is 1440 (24 hrs)
+
+STAT_FILE = "stats.json"
+JOURNALD_NAME = None
 LOG_LEVEL = "WARNING"  # Options are: 'DEBUG','INFO','WARNING','ERROR','NONE', default is 'WARNING'
 MAX_LOGFILE_SIZE_IN_MB = 10  # Default: 10
 ROLLING_WEIGHT_WINDOW = 90  # Use stats up to x days old for calculating intended weights vs actual crunch time, Default: 90. Note that "benchmarking" is applied to total time, not windowed time. Benchmarking will take 1% of ALL crunching time across ALL time history. This enables you set smaller "windows" and get faster reaction to weight changes without over-doing benchmarking.
@@ -120,12 +123,10 @@ BENCHMARKING_DELAY_IN_DAYS = 160  # if we have not had a WU from a project in th
 SKIP_BENCHMARKING = False  # You can use this to skip all benchmarking. Useful if you've already benchmarked on another identical device and determined most profitable project(s)
 # these are not fully implemented yet, but would theoretically allow you to control a non-local BOINC client. They may or may not work idk.
 BOINC_IP = "127.0.0.1"  # defaults to '127.0.0.1' with quotes
+BOINC_PORT = 31416
 BOINC_USERNAME = None  # defaults to None without quotes
 BOINC_PASSWORD = None  # defaults to None, password to the BOINC rpc
-BOINC_PORT = 31416
 
-STAT_FILE = "stats.json"
-JOURNALD_NAME = None
 CYCLE_SLEEP_TIME = 30  # There's no reason to loop through all projects more than once every 30 minutes
 CYCLE_CHECK_TIME = 1   # Check for crunching once every 1 minute
 CYCLE_SAVE_TIME = 10   # Save database every ten minutes

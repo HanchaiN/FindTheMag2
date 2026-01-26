@@ -2,40 +2,83 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 from __future__ import annotations
 
+__version__ = "3.3"
+
 
 try:
-    from math import floor, ceil
     import copy
     import shlex
     import shutil
     import subprocess
+    import functools
     from time import sleep
     import asyncio
-    import config
     import logging.handlers
     import os
     import libs.pyboinc
-    from libs.pyboinc._parse import parse_generic
-    from libs.pyboinc import init_rpc_client
-    import xml.etree.ElementTree as ET
     import json
-    import pprint
     import re
     import platform
+    import importlib
     from pathlib import Path
     import datetime
-    import xmltodict
-    import requests
-    from requests.auth import HTTPBasicAuth
-    from typing import List, Union, Dict, Tuple, Set, Any
+    import pprint
+    from typing import List, Union, Dict, Tuple, Any, Callable, Collection
     import sys, signal
-    from grc_price_utils import get_grc_price_from_sites
-    from currency_utils import get_currency_from_sites
+    from utils.grc_price_utils import get_grc_price_from_sites
+    from utils.currency_utils import get_currency_from_sites
+    from utils.StatsHelper import (
+        add_mag_to_combined_stats,
+        config_files_to_stats,
+        get_highest_priority_project,
+        get_most_mag_efficient_projects,
+        resolve_url_boinc_rpc,
+        get_avg_mag_hr,
+    )
+    from utils.BoincClientConnection import (
+        BoincClientConnection,
+        check_log_entries,
+        check_log_entries_for_backoff,
+        get_all_projects,
+        get_attached_projects,
+        get_task_list,
+        is_boinc_crunching,
+        kill_all_unstarted_tasks,
+        nnt_all_projects,
+        prefs_check,
+        run_rpc_command,
+        setup_connection,
+        undo_nnt_all_projects,
+        verify_boinc_connection,
+        wait_till_no_xfers,
+    )
+    from utils.GridcoinClientConnection import (
+        GridcoinClientConnection,
+        wait_till_synced,
+        get_gridcoin_config_parameters,
+        ProjectMagRatio,
+        check_sidestake,
+    )
+    from utils.utils import (
+        GracefulInterruptHandler,
+        center_align,
+        combine_dicts,
+        date_to_date,
+        json_default,
+        left_align,
+        object_hook,
+        print_and_log as _print_and_log,
+        resolve_url_database,
+        resolve_url_list_to_database,
+        project_url_to_name,
+        project_list_to_project_list,
+    )
 
     # This is needed for some async stuff
     import nest_asyncio
 
     nest_asyncio.apply()
+
     # Ignore deprecation warnings in Windows
     import warnings
 except Exception as e:
@@ -51,141 +94,157 @@ except Exception as e:
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Set default settings for all vars
-preferred_projects_percent: float = 80
-preferred_projects: Dict[str, int] = {}
+PREFERRED_PROJECTS: Dict[str, float] = {}
+PREFERRED_PROJECTS_PERCENT: float = 10
 IGNORED_PROJECTS: List[str] = ["https://foldingathome.div72.xyz/"]
-BOINC_DATA_DIR: Union[str, None] = None
-GRIDCOIN_DATA_DIR: Union[str, None] = None
-CONTROL_BOINC: bool = False
-BOINC_IP: str = "127.0.0.1"
-BOINC_PORT: int = 31416
-BOINC_USERNAME: Union[str, None] = None
-BOINC_PASSWORD: Union[str, None] = None
-MIN_GB: float = 10
-EXPECTED_GB_USED: float = 0.5
-# Minimum time in minutes before re-asking a project for work who previously said
-# they were out
-MIN_RECHECK_TIME: int = 30
-ABORT_UNSTARTED_TASKS: bool = False
-RECALCULATE_STATS_INTERVAL: int = 60
-PRICE_CHECK_INTERVAL: int = 720
+
+ONLY_BOINC_IF_PROFITABLE: bool = False
+ONLY_MINE_IF_PROFITABLE: bool = False
+CURRENCY_CODE: str = "USD"
 LOCAL_KWH: float = 0.1542
 GRC_SELL_PRICE: Union[float, None] = None
 EXCHANGE_FEE: float = 0.00
-CURRENCY_CODE: str = "USD"
-ONLY_BOINC_IF_PROFITABLE: bool = False
-ONLY_MINE_IF_PROFITABLE: bool = False
 HOST_POWER_USAGE: float = 70
 MIN_PROFIT_PER_HOUR: float = 0
-BENCHMARKING_MINIMUM_WUS: float = 5
-BENCHMARKING_MINIMUM_TIME: float = 10
-BENCHMARKING_DELAY_IN_DAYS: float = 160
-SKIP_BENCHMARKING: bool = False
+
+CONTROL_BOINC: bool = False
 DEV_FEE: float = 0.05
-VERSION = 3.3
-DEV_RPC_PORT = 31418
-LOG_LEVEL = "WARNING"
+SCRIPTED_RUN: bool = False
+SKIP_TABLE_UPDATES: bool = False
+
+ENABLE_TEMP_CONTROL = True  # Enable controlling BOINC based on temp. Default: False
 START_TEMP: int = 65
 STOP_TEMP: int = 75
-TEMP_COMMAND = None
-ENABLE_TEMP_CONTROL = True  # Enable controlling BOINC based on temp. Default: False
-TEMP_SLEEP_TIME = 10
-TEMP_REGEX = r"\d*"
-MAX_LOGFILE_SIZE_IN_MB = 10
-ROLLING_WEIGHT_WINDOW = 60
-LOOKBACK_PERIOD = 30
+TEMP_SLEEP_TIME: float = 10
+TEMP_URL: str | None = None
+TEMP_COMMAND: str | None = None
+TEMP_REGEX: str = r"\d*"
+TEMP_FUNCTION: Union[Callable[[], None], None] = lambda: None
+
 DUMP_PROJECT_WEIGHTS: bool = False  # Dump weights assigned to projects
 DUMP_PROJECT_PRIORITY: bool = (
     False  # Dump weights adjusted after considering current and past crunching time
 )
 DUMP_RAC_MAG_RATIOS: bool = False  # Dump the RAC:MAG ratios from each Gridcoin project
 DUMP_DATABASE: bool = False  # Dump the DATABASE
-DEV_FEE_MODE: str = "CRUNCH"  # valid values: CRUNCH|SIDESTAKE
-CRUNCHING_FOR_DEV: bool = False
-DEV_EXIT_TEST: bool = False  # Only used for testing
-EXIT_NNT: bool | None = None
+# how many decimal places to round each stat to which is printed in the output table
+ROUNDING_DICT: Dict[str, int] = {
+    "MAGPERCREDIT": 5,
+    "AVGMAGPERHOUR": 3,
+    "USD/DAY R": 3,
+    "USD/DAY P": 3,
+    "ATIME": 1,
+    "ACTIME": 1,
+    "ACPT": 1,
+    "TASKS": 0,
+    "WTIME": 1,
+    "CPUTIME": 1,
+    "CREDIT/HR": 1,
+    "R-WTIME": 1,
+}
+
+LOOKBACK_PERIOD = 30
+ABORT_UNSTARTED_TASKS: bool = False
+BOINC_DATA_DIR: Union[str, None] = None
+GRIDCOIN_DATA_DIR: Union[str, None] = None
+STRICT_GRIDCOIN: bool = False
+RECALCULATE_STATS_INTERVAL: int = 60
+PRICE_CHECK_INTERVAL: int = 720
+
 STAT_FILE: str = "stats.json"
 JOURNALD_NAME: str | None = None
-CYCLE_SLEEP_TIME: float = 30  # There's no reason to loop through all projects more than once every 30 minutes
-CYCLE_CHECK_TIME: float = 1   # Check for crunching once every 1 minute
-CYCLE_SAVE_TIME: float = 10   # Save database every ten minutes
-CYCLE_TEMP_TIME: float = 10   # Check for temperature once every ten minutes
+LOG_LEVEL = "WARNING"
+MAX_LOGFILE_SIZE_IN_MB = 10
+ROLLING_WEIGHT_WINDOW = 60
+
+BENCHMARKING_MINIMUM_WUS: float = 5
+BENCHMARKING_MINIMUM_TIME: float = 10
+BENCHMARKING_DELAY_IN_DAYS: float = 160
+SKIP_BENCHMARKING: bool = False
+
+BOINC_IP: str = "127.0.0.1"
+BOINC_PORT: int = 31416
+BOINC_USERNAME: Union[str, None] = None
+BOINC_PASSWORD: Union[str, None] = None
+
+CYCLE_SLEEP_TIME: float = (
+    30  # There's no reason to loop through all projects more than once every 30 minutes
+)
+CYCLE_CHECK_TIME: float = 1  # Check for crunching once every 1 minute
+CYCLE_SAVE_TIME: float = 10  # Save database every ten minutes
+CYCLE_TEMP_TIME: float = 10  # Check for temperature once every ten minutes
+
+EXIT_NNT: bool | None = None
+EXTERNAL_REQUEST_PROXIES: Dict[str, str] = {}
+
+# Constants
+MIN_GB: float = 10
+EXPECTED_GB_USED: float = 0.5
+# Minimum time in minutes before re-asking a project for work who previously said
+# they were out
+MIN_RECHECK_TIME: int = 30
+DEV_RPC_PORT = 31418
+DEV_EXIT_TEST: bool = False  # Only used for testing
+# Translates BOINC's CPU and GPU Mode replies into English. Note difference between
+# keys integer vs string.
+CPU_MODE_DICT = {1: "always", 2: "auto", 3: "never"}
+GPU_MODE_DICT = {"1": "always", "2": "auto", "3": "never"}
 
 # Some globals we need. I try to have all globals be ALL CAPS
+TESTING: bool = False
 FORCE_DEV_MODE = (
     False  # Used for debugging purposes to force crunching under dev account
 )
+CHECK_SIDESTAKE_RESULTS = False
+DEV_FEE_MODE: str = "CRUNCH"  # valid values: CRUNCH|SIDESTAKE
+CRUNCHING_FOR_DEV: bool = False
+DEV_BOINC_PASSWORD = ""  # This is only used for printing to table, not used elsewhere
+DEV_LOOP_RUNNING = False
 BOINC_PROJECT_NAMES = {}
-DATABASE = {}
+DATABASE: Dict[str, Any] = {}
 DATABASE["TABLE_SLEEP_REASON"] = (
     ""  # Sleep reason printed in table, must be reset at script start
 )
 DATABASE["TABLE_STATUS"] = (
     ""  # Info status printed in table, must be reset at script start
 )
-SCRIPTED_RUN: bool = False
-SKIP_TABLE_UPDATES: bool = False
-STRICT_GRIDCOIN: bool = False
 LAST_KNOWN_CPU_MODE = None
 LAST_KNOWN_GPU_MODE = None
-LOOKUP_URL_TO_DATABASE = {}  # Lookup table for uppered URLS -> canonical URLs.
-LOOKUP_URL_TO_BOINC = (
-    {}
-)  # Lookup table for uppered URLs -> BOINC urls. Note the key is NOT the canonical url, just an uppered URL for performance reasons.
-LOOKUP_URL_TO_BOINC_DEV = (
-    {}
-)  # Lookup table for uppered URLs -> BOINC urls for dev client. Note the key is NOT the canonical url, just an uppered URL for performance reasons.
+ALL_PROJECT_URLS = set()
+ALL_BOINC_PROJECTS = set()
 ATTACHED_PROJECT_SET = set()
 ATTACHED_PROJECT_SET_DEV = set()
 COMBINED_STATS = {}
 COMBINED_STATS_DEV = {}
-PROJECT_MAG_RATIOS_CACHE = {}
-TESTING: bool = False
-PRINT_URL_LOOKUP_TABLE: Dict[str, str] = (
-    {}
-)  # Used to convert urls for printing to table
 MAG_RATIO_SOURCE: Union[str, None] = None  # Valid values: WALLET|WEB
-CHECK_SIDESTAKE_RESULTS = False
-EXTERNAL_REQUEST_PROXIES: Union[Dict[str, str]] = None
-loop = asyncio.get_event_loop()
-# Translates BOINC's CPU and GPU Mode replies into English. Note difference between
-# keys integer vs string.
-CPU_MODE_DICT = {1: "always", 2: "auto", 3: "never"}
-GPU_MODE_DICT = {"1": "always", "2": "auto", "3": "never"}
-ROUNDING_DICT = {
-    "MAGPERCREDIT": 5,
-    "AVGMAGPERHOUR": 3,
-}
-DEV_BOINC_PASSWORD = ""  # This is only used for printing to table, not used elsewhere
-DEV_LOOP_RUNNING = False
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
 
 
-def resolve_url_database(url: str) -> str:
+def verify_config_import(fname: str) -> bool:
     """
-    Given a URL or list of URLs, return the canonical version used in DATABASE and other internal references. Note that some projects operate at multiple
-    URLs. This will choose one URL and collapse all other URLs into it.
-    @param url: A url you want canonicalized
+    Verify that config or user_config imported correctly
+    @param fname: Filename to verify
     """
-    uppered = url.upper()
-    if uppered in LOOKUP_URL_TO_DATABASE:
-        return LOOKUP_URL_TO_DATABASE[uppered]
-    uppered = uppered.replace("HTTPS://WWW.", "")
-    uppered = uppered.replace("HTTP://WWW.", "")
-    uppered = uppered.replace("HTTPS://", "")
-    uppered = uppered.replace("HTTP://", "")
-    if uppered.startswith(
-        "WWW."
-    ):  # This is needed as WWW. may legitimately exist in a url outside of the starting portion
-        uppered = uppered.replace("WWW.", "")
-    if uppered.endswith("/"):  # Remove trailing slashes
-        uppered = uppered[:-1]
-    if "WORLDCOMMUNITYGRID.ORG/BOINC" in uppered:
-        uppered = "WORLDCOMMUNITYGRID.ORG"
-    LOOKUP_URL_TO_DATABASE[url.upper()] = uppered
-    return uppered
+    if not os.path.isfile(fname + ".py"):
+        return False
+    try:
+        module = importlib.import_module(fname)
+    except Exception as e:
+        print("Error opening user_config.py, using defaults! Error is: {}".format(e))
+        return False
+    for variable in dir(module):
+        if variable.startswith("__"):
+            continue
+        # Verify all imports are upper-cased
+        if str(variable) != variable.upper():
+            error = "Error: variable from {} file {} is not uppercased. Make sure all variables you set are uppercased and named the same as the template in config.py".format(
+                fname, variable
+            )
+            print(error)
+            sys.exit(1)
+    return True
 
 
 # Import user settings from config
@@ -194,87 +253,73 @@ try:
 except Exception as e:
     print("Error opening config.py, using defaults! Error is: {}".format(e))
 # Import additional user settings from user_config
-if os.path.isfile("user_config.py"):
-    try:
-        from user_config import *  # You can ignore an unresolved reference error here in pycharm since user is expected to create this file
-        import user_config
-    except Exception as e:
-        print("Error opening user_config.py, using defaults! Error is: {}".format(e))
-# Verify all imports are upper-cased
-for variable in dir(config):
-    if variable.startswith("__"):
-        continue
-    if str(variable) != variable.upper():
-        error = "Error: variable from config file {} is not uppercased. Make sure all variables you set are uppercased and named the same as the template in config.py".format(
-            variable
-        )
-        print(error)
-        sys.exit(1)
-if os.path.exists("user_config.py"):
-    for variable in dir(user_config):
-        if variable.startswith("__"):
-            continue
-        if str(variable) != variable.upper():
-            error = "Error: variable from config file {} is not uppercased. Make sure all variables you set are uppercased and named the same as the template in config.py".format(
-                variable
-            )
-            print(error)
-            sys.exit(1)
+if verify_config_import("user_config"):
+    _ROUNDING_DICT = copy.deepcopy(ROUNDING_DICT)
+    from user_config import *
 
+    ROUNDING_DICT = combine_dicts(_ROUNDING_DICT, ROUNDING_DICT)
+
+
+loop = asyncio.get_event_loop()
 HOST_COST_PER_HOUR = (HOST_POWER_USAGE / 1000) * LOCAL_KWH
 
+
 # Setup logging
-log = logging.getLogger()
-if LOG_LEVEL == "NONE":
-    log.addHandler(logging.NullHandler())
-else:
-    log.setLevel(os.environ.get("LOGLEVEL", LOG_LEVEL))
-    use_logfile=True
-    if JOURNALD_NAME is not None:
-        try:
-            from systemd import journal
-            log.addHandler(journal.JournalHandler(SYSLOG_IDENTIFIER=JOURNALD_NAME))
-            use_logfile=False
-        except Exception as e:
-            print("Error importing systemd.journal, fallback to LOGFILE")
-    if use_logfile:
-        handler = logging.handlers.RotatingFileHandler(
-            os.environ.get("LOGFILE", "debug.log"),
-            maxBytes=MAX_LOGFILE_SIZE_IN_MB * 1024 * 1024,
-            backupCount=1,
+def setup_log():
+    log = logging.getLogger()
+    global LOG_LEVEL
+    global JOURNALD_NAME
+    global MAX_LOGFILE_SIZE_IN_MB
+    if LOG_LEVEL == "NONE":
+        log.setLevel(logging.CRITICAL + 10)
+        log.addHandler(logging.NullHandler())
+    else:
+        log.setLevel(os.environ.get("LOGLEVEL", LOG_LEVEL))
+        use_logfile = True
+        if JOURNALD_NAME is not None:
+            try:
+                from systemd import journal
+
+                log.addHandler(journal.JournalHandler(SYSLOG_IDENTIFIER=JOURNALD_NAME))
+                use_logfile = False
+            except Exception as e:
+                print("Error importing systemd.journal, fallback to LOGFILE")
+        if use_logfile:
+            handler = logging.handlers.RotatingFileHandler(
+                os.environ.get("LOGFILE", "debug.log"),
+                maxBytes=MAX_LOGFILE_SIZE_IN_MB * 1024 * 1024,
+                backupCount=1,
+            )
+            formatter = logging.Formatter(
+                fmt="[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] %(message)s"
+            )
+            handler.setFormatter(formatter)
+            log.addHandler(handler)
+        log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
+        log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
+        log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
+        log.error(
+            "Start FTM log FTM version %s at %s",
+            __version__,
+            datetime.datetime.now().strftime("%m/%d/%Y, %H:%M:%S"),
         )
-        formatter = logging.Formatter(
-            fmt="[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] %(message)s"
-        )
-        handler.setFormatter(formatter)
-        log.addHandler(handler)
-    log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
-    log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
-    log.error("+++++++++++++++FTM STARTING+++++++++++++++++")
-    log.error(
-        "Start FTM log FTM version {} at {}".format(
-            VERSION, datetime.datetime.now().strftime("%m/%d/%Y, %H:%M:%S")
-        )
-    )
+    return log
+
+
+log = setup_log()
+print_and_log = functools.partial(_print_and_log, log=log)
 
 # Canonicalize URLs given to us by user
-old_preferred_projects = copy.deepcopy(PREFERRED_PROJECTS)
-PREFERRED_PROJECTS = {}
-for url, amount in old_preferred_projects.items():
-    canonicalized = resolve_url_database(url)
-    PREFERRED_PROJECTS[canonicalized] = amount
-for url in list(IGNORED_PROJECTS):
-    IGNORED_PROJECTS.remove(url)
-    canonicalized = resolve_url_database(url)
-    IGNORED_PROJECTS.append(canonicalized)
+PREFERRED_PROJECTS = {resolve_url_database(k): v for k, v in PREFERRED_PROJECTS.items()}
+IGNORED_PROJECTS = resolve_url_list_to_database(IGNORED_PROJECTS)
 
 # If user has no preferred projects, their % of crunching should be 0
 if len(PREFERRED_PROJECTS) == 0:
-    preferred_projects_percent: float = 0
+    PREFERRED_PROJECTS_PERCENT = 0
 
 # Detect platform, guess BOINC and Gridcoin directories if needed
 FOUND_PLATFORM = platform.system()
-if not BOINC_DATA_DIR:
+if BOINC_DATA_DIR is None:
     if FOUND_PLATFORM == "Linux":
         if os.path.isdir("/var/lib/boinc-client"):
             BOINC_DATA_DIR = "/var/lib/boinc-client"
@@ -286,7 +331,9 @@ if not BOINC_DATA_DIR:
         BOINC_DATA_DIR = os.path.join("/Library/Application Support/BOINC Data/")
     else:
         BOINC_DATA_DIR = "C:\\ProgramData\\BOINC\\"
-if not GRIDCOIN_DATA_DIR:
+assert BOINC_DATA_DIR is not None, "BOINC_DATA_DIR is None!"
+
+if GRIDCOIN_DATA_DIR is None:
     if FOUND_PLATFORM == "Linux":
         GRIDCOIN_DATA_DIR = os.path.join(Path.home(), ".GridcoinResearch/")
     elif FOUND_PLATFORM == "Darwin":
@@ -297,275 +344,656 @@ if not GRIDCOIN_DATA_DIR:
         GRIDCOIN_DATA_DIR = os.path.join(
             Path.home(), "AppData\\Roaming\\GridcoinResearch\\"
         )
+assert GRIDCOIN_DATA_DIR is not None, "GRIDCOIN_DATA_DIR is None!"
+
+# === Fetch update ===
 
 
-class GridcoinClientConnection:
-    """Allows connecting to a Gridcoin wallet and issuing RPC commands.
+def update_fetch(
+    update_text: Union[str, None] = None, current_ver: Union[str, None] = None
+) -> Tuple[bool, bool, Union[str, None]]:
+    """Check if FindTheMag updates are avialable.
 
-    A class for connecting to a Gridcoin wallet and issuing RPC commands. Currently
-    quite barebones.
+    Check with FindTheMag repository on GitHub whether or not an update is
+    available. If avaialble, inform the user and provide some information.
 
-    Attributes:
-        config_file:
-        ip_address:
-        rpc_port:
-        rpc_user:
-        rpc_password:
-        retries:
-        retry_delay:
+    Update checks are performed no often then once per week. Check times are
+    stored in the database for future reference.
+
+    Args:
+        update_text: Used for testing purposes. Default: None
+        current_ver: Added for testing purposes. Default: None
+
+    Returns:
+        A tuple consisting of:
+            A bool, set to True if and update is available.
+            A bool, set to True if the update is a security update.
+            A string containing update related information.
+
+    Raises:
+        Exception: An error occured when attempting to parse the retrieved update file.
     """
+    update_return = False
+    return_string = ""
+    security_update_return = False
 
-    def __init__(
-        self,
-        config_file: str = None,
-        ip_address: str = "127.0.0.1",
-        rpc_port: str = "9876",
-        rpc_user: str = None,
-        rpc_password: str = None,
-        retries: int = 3,
-        retry_delay: int = 1,
-    ):
-        """Initializes the instance based on the connection attributes.
+    # Added for testing purposes
+    if update_text is not None:
+        resp = update_text
+    else:
+        resp = None
+    if current_ver is None:
+        current_ver = __version__
+    from packaging.version import Version
 
-        Attributes:
-            config_file:
-            ip_address:
-            rpc_port:
-            rpc_user:
-            rpc_password:
-            retries: int = 3,
-            retry_delay: int = 1,
-        """
-        self.configfile = config_file  # Absolute path to the client config file
-        self.ipaddress = ip_address
-        self.rpc_port = rpc_port
-        self.rpcuser = rpc_user
-        self.rpcpassword = rpc_password
-        self.retries = retries
-        self.retry_delay = retry_delay
+    _current_ver = Version(current_ver)
 
-    def run_command(
-        self, command: str, arguments: List[Union[str, bool]] = None
-    ) -> Union[dict, None]:
-        """Send command to local Gridcoin wallet
+    # If we've checked for updates in the last week, ignore
+    delta = datetime.datetime.now() - DATABASE.get(
+        "LASTUPDATECHECK", datetime.datetime(1997, 3, 3)
+    )
+    if abs(delta.days) < 7:
+        return False, False, None
+    # Get update status from Github
+    if resp is None:
+        import requests as req
 
-        Sends specifified Gridcoin command to the Gridcoin wallet instance and
-        retrieves result of the command execution.
-
-        Args:
-            command:
-            arguments:
-
-        Returns:
-            Response from command exectution as a dictionary of json, or None if
-            an error was encounted while connecting to the Gridcoin wallet instance.
-        """
-        if not arguments:
-            arguments = []
-        current_retries = 0
-        while current_retries < self.retries:
-            sleep(self.retry_delay)
-            current_retries += 1
-            credentials = None
-            url = "http://" + self.ipaddress + ":" + self.rpc_port + "/"
-            headers = {"content-type": "application/json"}
-            payload = {
-                "method": command,
-                "params": arguments,
-                "jsonrpc": "2.0",
-                "id": 0,
+        headers = req.utils.default_headers()
+        headers.update(
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
             }
-            jsonpayload = json.dumps(payload, default=json_default)
-            if self.rpcuser or self.rpcpassword:
-                credentials = HTTPBasicAuth(self.rpcuser, self.rpcpassword)
-            try:
-                response = requests.post(
-                    url, data=jsonpayload, headers=headers, auth=credentials
-                )
-                return_response = response.json()
-            except Exception:
-                pass
+        )
+        url = "https://raw.githubusercontent.com/makeasnek/FindTheMag2/main/updates.txt"
+        try:
+            resp = req.get(url, headers=headers, proxies=EXTERNAL_REQUEST_PROXIES).text
+        except Exception as e:
+            DATABASE["TABLE_STATUS"] = "Error checking for updates {}".format(e)
+            log.error("Error checking for updates {}".format(e))
+            return False, False, None
+        if "UPDATE FILE FOR FINDTHEMAG DO NOT DELETE THIS LINE" not in resp:
+            DATABASE["TABLE_STATUS"] = "Error checking for updates invalid update file"
+            log.error("Error checking for updates invalid update file")
+            return False, False, None
+    try:
+        for line in resp.splitlines():
+            if line.startswith("#"):
+                continue
+            if line == "":
+                continue
+            if "," not in line:
+                continue
+            split = line.split(",")
+            version = Version(split[0])
+            if split[1] == "1":
+                security = True
             else:
-                return return_response
-        return None
+                security = False
+            notes = split[2]
+            if version > _current_ver:
+                if security:
+                    security_update_return = True
+                    update_return = True
+                    return_string = (
+                        return_string
+                        + "Version {} available. This is an important security update. Changes include {}\n".format(
+                            version, notes
+                        )
+                    )
+                else:
+                    update_return = True
+                    return_string = (
+                        return_string
+                        + "Version {} available. Changes include {}\n".format(
+                            version, notes
+                        )
+                    )
+    except Exception as e:
+        log.error("Error parsing update file")
+    DATABASE["LASTUPDATECHECK"] = datetime.datetime.now()
+    if return_string == "":
+        return_string = None
+    return update_return, security_update_return, return_string
 
-    def get_approved_project_urls(self) -> List[str]:
-        """Retrieves list of projects appoved for Gridcoin.
 
-        Retrieves the list of projects from the local Gridcoin wallet that are
-        approved for earning Gridcoin.
+def update_check() -> None:
+    """Check if FindTheMag updates are avialable.
 
-        Returns:
-            A list of UPPERCASED project URLs using gridcoin command listprojects
-        """
-        return_list = []
-        all_projects = self.run_command("listprojects")
-        for projectname, project in all_projects["result"].items():
-            return_list.append(project["base_url"].upper())
-        return return_list
-
-
-class BoincClientConnection:
-    """Access to BOINC client configuration files.
-
-    A simple class for grepping BOINC config files etc. Doesn't do any RPC communication
-
-    Note: Usage of it should be wrapped in try/except clauses as it does not
-          do any error handling internally.
-
-    Attributes:
-        config_dir:
+    Check for updates to the FindTheMag tool and logs information on any updates found.
     """
-
-    def __init__(self, config_dir: str = None):
-        """Initializes the instance using the Gridcoin wallet configuration location.
-
-        Args:
-            config_dir:
-        """
-        if config_dir is None:
-            self.config_dir = "/var/lib/boinc-client"
-        else:
-            self.config_dir = config_dir  # Absolute path to the client config dir
-
-    def get_project_list(self) -> List[str]:
-        """Retrieve the list of projects supported by the BOINC client
-
-        Constructs a list of all projects known by the BOINC client. This may include
-        more projects than those currently attached to the BOINC client. This may also
-        not include some projects currently attached, if they are projects not included
-        with BOINC by default.
-
-        Returns: List of project URLs.
-        """
-        project_list_file = os.path.join(self.config_dir, "all_projects_list.xml")
-        return_list = []
-        with open(project_list_file, mode="r", encoding="ASCII", errors="ignore") as f:
-            parsed = xmltodict.parse(f.read())
-            for project in parsed["projects"]["project"]:
-                return_list.append(project["url"])
-        return return_list
-
-
-def grc_project_name_to_url(
-    searchname: str, all_projects: Union[Dict[str, Dict[str, Any]], Dict[str, str]]
-) -> Union[str, None]:
-    """
-    Convert a project name into its canonical project URL
-    : param : all_projects putput from listprojects rpc command
-    """
-    for found_project_name, found_project_dict in all_projects.items():
-        if found_project_name.upper() == searchname.upper():
-            if isinstance(found_project_dict, str):
-                return found_project_dict
-            elif isinstance(found_project_dict, dict):
-                return found_project_dict["base_url"]
-    return None
-
-
-def wait_till_synced(grc_client: GridcoinClientConnection):
-    """
-    A function to WAIT until client is fully synced
-    :param grc_client:
-    :return:
-    """
-    from time import sleep
-
-    printed = False
-    while True:
-        response = grc_client.run_command("getinfo")
-        if isinstance(response, dict):
-            sync_status = response.get("result", {}).get("in_sync")
-            if sync_status == True:
-                return
-        sleep(1)
-        if printed == False:
-            print("Gridcoin wallet is not fully synced yet. Waiting for full sync...")
-            printed = True
-
-
-def combine_dicts(dict1: Dict[str, Any], dict2: Dict[str, Any]) -> None:
-    """
-    Given dict1, dict2, add dict2 to dict1, over-writing anything in dict1.
-    @param dict1:
-    @param dict2:
-    @return: NONE
-    """
-    for k, v in dict2.items():
-        dict1[k] = v
-
-
-def resolve_url_boinc_rpc(
-    url: str,
-    known_attached_projects: Set[str] = None,
-    known_attached_projects_dev: Set[str] = None,
-    known_boinc_projects: List[str] = None,
-    dev_mode: bool = False,
-) -> str:
-    """
-    Given a URL, return the version BOINC is attached to for RPC purposes. Variables aside from dev_mode default to globals if
-    not passed in.
-    @param url: A url you want canonicalized
-    @param known_attached_projects: Projects BOINC is attached to
-    @param known_boinc_projects: Projects BOINC knows about via default install xml file (or rpc get_all_projects which returns the same)
-    """
-    original_uppered = url.upper()
-    if "FOLDINGATHOME" in original_uppered:
-        return url
-    if not known_attached_projects:
-        known_attached_projects = ATTACHED_PROJECT_SET
-    if not known_attached_projects_dev:
-        known_attached_projects_dev = ATTACHED_PROJECT_SET_DEV
-    if not known_boinc_projects:
-        known_boinc_projects = ALL_PROJECT_URLS
-
-    # Check quick lookup tables first
-    if dev_mode:
-        if original_uppered in LOOKUP_URL_TO_BOINC_DEV:
-            return LOOKUP_URL_TO_BOINC_DEV[original_uppered]
-    else:
-        if original_uppered in LOOKUP_URL_TO_BOINC:
-            return LOOKUP_URL_TO_BOINC[original_uppered]
-
-    # Do full lookup if that doesn't work
-    uppered = original_uppered.replace("HTTPS://WWW.", "")
-    uppered = uppered.replace("HTTP://WWW.", "")
-    uppered = uppered.replace("HTTPS://", "")
-    uppered = uppered.replace("HTTP://", "")
-    if uppered.startswith("WWW."):
-        uppered = uppered.replace("WWW.", "")
-    if dev_mode:
-        for known_attached_project in known_attached_projects_dev:
-            if uppered in known_attached_project.upper():
-                LOOKUP_URL_TO_BOINC_DEV[original_uppered] = known_attached_project
-                return known_attached_project
-    else:
-        for known_attached_project in known_attached_projects:
-            if uppered in known_attached_project.upper():
-                LOOKUP_URL_TO_BOINC[original_uppered] = known_attached_project
-                return known_attached_project
-        log.debug(
-            "{} not in in known attached projects in resolve_url_boinc_rpc".format(
-                uppered
-            )
+    available, security, print_me = update_fetch()
+    if print_me is not None:
+        print_and_log(
+            print_me,
+            ("DEBUG" if not available else "INFO") if not security else "WARNING",
         )
 
-    for known_boinc_project in known_boinc_projects:
-        if uppered in known_boinc_project.upper():
-            return known_boinc_project
-    log.warning("Unable to resolve URL to BOINC url: {}".format(url))
-    return url
+
+# === Fetch data ===
 
 
-def resolve_url_list_to_database(url_list: List[str]) -> List[str]:
+def get_grc_price() -> Union[float, None]:
     """
-    @param url_list: A list of URLs
-    @return: The URLs in canonical database format
+    Gets average GRC price from three online sources. Returns None if unable to determine
     """
-    return_list = []
-    for url in url_list:
-        return_list.append(resolve_url_database(url))
-    return return_list
+    """Retrieve current average Gridcoin price.
+
+    Calculates the average GRC price based on values from three online sources.
+
+    Note: Retrieving the prices is dependent on the target website formatting. If the
+    source website changes significantly, retrieval may fail until the relevant 
+    search pattern in updated.
+
+    Args:
+
+    Returns:
+        Average GCR price in decimal, or None if unable to determine price.
+
+    Raises:
+        Exception: An error occurred accessing an online GRC price source.
+    """
+    price, table_message, url_messages, info_log_messages, error_log_messages = (
+        get_grc_price_from_sites(proxies=EXTERNAL_REQUEST_PROXIES)
+    )
+
+    for log_message in info_log_messages:
+        log.info(log_message)
+
+    for log_message in error_log_messages:
+        log.error(log_message)
+
+    if price:
+        DATABASE["TABLE_STATUS"] = table_message
+
+        for url_message in url_messages:
+            print_and_log(url_message, "ERROR")
+
+        return price
+
+    DATABASE["TABLE_STATUS"] = table_message
+
+    for url_message in url_messages:
+        print_and_log(url_message, "ERROR")
+
+    return DATABASE.get("GRCPRICE", 0)
+
+
+def get_currency_rate(currency_code: str) -> Union[float, None]:
+    """
+    Gets average currency exchange rate from online sources. Returns None if unable to determine
+    @sample_text: Used for testing. Just a "view source" of all pages added together
+    """
+    """Retrieve current average currency exchange rate.
+
+    Calculates the average currency exchange rate based on values from three online sources.
+
+    Note: Retrieving the prices is dependent on the target website formatting. If the
+    source website changes significantly, retrieval may fail until the relevant 
+    search pattern in updated.
+
+    Args:
+
+    Returns:
+        Average currency exchange rate in decimal, or None if unable to determine price.
+
+    Raises:
+        Exception: An error occurred accessing an online currency exchange rate source.
+    """
+    price, table_message, url_messages, info_log_messages, error_log_messages = (
+        get_currency_from_sites(currency_code, proxies=EXTERNAL_REQUEST_PROXIES)
+    )
+
+    for log_message in info_log_messages:
+        log.info(log_message)
+
+    for log_message in error_log_messages:
+        log.error(log_message)
+
+    if price:
+        DATABASE["TABLE_STATUS"] = table_message
+
+        for url_message in url_messages:
+            print_and_log(url_message, "ERROR")
+
+        return price
+
+    DATABASE["TABLE_STATUS"] = table_message
+
+    for url_message in url_messages:
+        print_and_log(url_message, "ERROR")
+
+    return DATABASE.get("CURRENCY_{}".format(currency_code), 1)
+
+
+def get_approved_project_urls_web(
+    query_result: Union[str, None] = None,
+) -> Dict[str, str]:
+    """List of projects currently witelised by Gridcoin.
+
+    Gets current whitelist from the Gridcoinstats website. Limits fetching
+    from website to once every 24 hours through caching list in database.
+
+    Args:
+        query_result: Used for testing.
+
+    Returns:
+        A dictionary mapping base URLs to project names.
+
+    Raises:
+        Exception: An error occurred fetching stats data from the website.
+        Exception: An error occurred parsing data from the source website.
+    """
+    # Check if cache is available
+    cache_available = "GSPROJECTLIST" in DATABASE and "GSRESOLVERDICT" in DATABASE
+    # Return cached version if we have it and requested it < 24 hrs ago
+    delta = datetime.datetime.now() - DATABASE.get(
+        "LASTGRIDCOINSTATSPROJECTCHECK", datetime.datetime(1993, 3, 3)
+    )
+    if abs(delta.days) < 1 and cache_available:
+        log.debug("Returning cached version of gridcoinstats data")
+        return DATABASE["GSRESOLVERDICT"]
+
+    # Otherwise, request it
+    import json
+
+    if query_result is None:
+        import requests as req
+
+        url = "https://www.gridcoinstats.eu/API/simpleQuery.php?q=listprojects"
+        try:
+            resp = req.get(url, proxies=EXTERNAL_REQUEST_PROXIES)
+        except Exception as e:
+            print("Error fetching magnitude stats from {}".format(url))
+            log.error("Error fetching magnitude stats from {}: {}".format(url, e))
+            if cache_available:
+                return DATABASE["GSRESOLVERDICT"]
+            else:
+                log.debug("Exiting safely")
+                safe_exit(None, None)
+        else:
+            if "BOINC" not in resp.text.upper():
+                log.error("Error fetching magnitude stats from {}".format(url))
+                if cache_available:
+                    log.debug("Returning cached magnitude stats")
+                    return DATABASE["GSRESOLVERDICT"]
+                else:
+                    log.debug("Exiting safely")
+                    safe_exit(None, None)
+            query_result = resp.text
+    assert query_result is not None
+
+    # Parse what we got back
+    return_list: List[str] = []
+    project_resolver_dict: Dict[str, str] = {}
+    loaded_json = {}
+    try:
+        loaded_json = json.loads(query_result)
+    except Exception as e:
+        log.error("Error parsing data from Gridcoinstats {}".format(e))
+        if cache_available:
+            log.error("Returning old gridcoinstats data".format(e))
+            return DATABASE["GSRESOLVERDICT"]
+        else:
+            print("Unable to continue...")
+            safe_exit(None, None)
+    for projectname, project in loaded_json.items():
+        project_resolver_dict[projectname] = resolve_url_database(project["base_url"])
+    DATABASE["LASTGRIDCOINSTATSPROJECTCHECK"] = datetime.datetime.now()
+    DATABASE["GSPROJECTLIST"] = return_list
+    DATABASE["GSRESOLVERDICT"] = project_resolver_dict
+    return project_resolver_dict
+
+
+# === Check!!! ===
+
+
+def profitability_check(
+    grc_price: float,
+    exchange_fee: float,
+    grc_sell_price: Union[None, float],
+    project: str,
+    min_profit_per_hour: float,
+    combined_stats: dict,
+) -> bool:
+    """
+    Returns True if crunching is profitable right now. False if otherwise or unable to determine.
+    """
+    if not grc_sell_price:
+        grc_sell_price = 0.00
+    if not isinstance(grc_price, float) and not isinstance(grc_price, int):
+        return False
+    combined_stats_extract = combined_stats.get(project)
+    if not combined_stats_extract:
+        log.error(
+            "Error: Unable to calculate profitability for project {} bc we have no stats for it".format(
+                project
+            )
+        )
+        return False
+    if "COMPILED_STATS" not in combined_stats_extract:
+        log.error(
+            "Error: Unable to calculate profitability for project {} bc we have no stats for it (COMPILED_STATS)".format(
+                project
+            )
+        )
+        return False
+    if "AVGMAGPERHOUR" not in combined_stats_extract["COMPILED_STATS"]:
+        log.error(
+            "Error: Unable to calculate profitability for project {} bc we have no stats for it (AVGMAGPERHOUR)".format(
+                project
+            )
+        )
+        return False
+    revenue_per_hour = (
+        combined_stats_extract["COMPILED_STATS"]["AVGMAGPERHOUR"]
+        / 4
+        * max(grc_price, grc_sell_price)
+    )
+    exchange_expenses = revenue_per_hour * exchange_fee
+    expenses_per_hour = exchange_expenses + HOST_COST_PER_HOUR
+    profit = revenue_per_hour - expenses_per_hour
+    if profit > min_profit_per_hour:
+        log.debug(
+            "Determined project {} is profitable. Rev is {} expenses is {} profit is {}".format(
+                project, revenue_per_hour, expenses_per_hour, profit
+            )
+        )
+        return True
+    log.debug(
+        "Determined project {} is NOT profitable. Rev is {} expenses is {} profit is {}".format(
+            project, revenue_per_hour, expenses_per_hour, profit
+        )
+    )
+    return False
+
+
+def get_latest_wu_date(combined_stats_extract: List[str]) -> datetime.datetime:
+    """
+    Given list of WUs, return latest date or 1993 if unable to find one
+    @param combined_stats_extract:
+    @return:
+    """
+    latest_date = datetime.datetime(1993, 1, 1)
+    for date in combined_stats_extract:
+        datetimed = date_to_date(date)
+        if datetimed > latest_date:
+            latest_date = datetimed
+    return latest_date
+
+
+def benchmark_check(
+    project_url: str,
+    combined_stats: dict,
+    benchmarking_minimum_wus: float,
+    benchmarking_minimum_time: float,
+    benchmarking_delay_in_days: float,
+    skip_benchmarking: bool,
+) -> bool:
+    """
+    Returns True if we should force crunch this project for benchmarking reasons. False otherwise
+    """
+    if skip_benchmarking:
+        return False
+    combined_stats_extract = combined_stats.get(project_url)
+    if not combined_stats_extract:
+        log.error("Unable to find project in benchmark_check".format(project_url))
+        return True
+    if (
+        combined_stats_extract.get("COMPILED_STATS", {}).get("TOTALWALLTIME", 0)
+        < benchmarking_minimum_time
+    ):
+        log.debug(
+            "Forcing WU fetch on {} due to BENCHMARKING_MINIMUM_TIME".format(
+                project_url
+            )
+        )
+        return True
+    if (
+        combined_stats_extract["COMPILED_STATS"]["TOTALTASKS"]
+        < benchmarking_minimum_wus
+    ):
+        log.debug(
+            "Forcing WU fetch on {} due to benchmarking_minimum_tasks".format(
+                project_url
+            )
+        )
+        return True
+    latest_date = get_latest_wu_date(combined_stats_extract["WU_HISTORY"])
+    delta = datetime.datetime.now() - latest_date
+    if abs(delta.days) > benchmarking_delay_in_days:
+        log.debug(
+            "Forcing WU fetch on {} due to BENCHMARKING_DELAY_IN_DAYS latest WU was {}".format(
+                project_url, latest_date
+            )
+        )
+        return True
+    return False
+
+
+# === Stats ===
+
+
+def create_default_database() -> Dict[str, Any]:
+    DATABASE: Dict[str, Any] = {}
+    DATABASE["DEVTIMECOUNTER"] = 0
+    DATABASE["FTMTOTAL"] = 0
+    DATABASE["DEVTIMETOTAL"] = 0
+    DATABASE["TABLE_STATUS"] = ""
+    DATABASE["TABLE_SLEEP_REASON"] = ""
+    return DATABASE
+
+
+def generate_stats(
+    combined_stats: dict,
+    approved_project_urls: Union[List[str], None] = None,
+    preferred_projects: Union[Dict[str, float], None] = None,
+    ignored_projects: Union[List[str], None] = None,
+    known_attached_projects: Union[Collection[str], None] = None,
+    known_attached_projects_dev: Union[Collection[str], None] = None,
+    known_boinc_projects: Union[Collection[str], None] = None,
+    mag_ratios: Union[Dict[str, float], None] = None,
+    quiet: bool = False,
+    ignore_unattached: bool = False,
+):
+    if approved_project_urls is None:
+        approved_project_urls = APPROVED_PROJECT_URLS
+    if preferred_projects is None:
+        preferred_projects = PREFERRED_PROJECTS
+    if ignored_projects is None:
+        ignored_projects = IGNORED_PROJECTS
+    if known_attached_projects is None:
+        known_attached_projects = ATTACHED_PROJECT_SET
+    if known_attached_projects_dev is None:
+        known_attached_projects_dev = ATTACHED_PROJECT_SET_DEV
+    if known_boinc_projects is None:
+        known_boinc_projects = ALL_PROJECT_URLS
+    weak_stats = []
+    if not quiet:
+        print_and_log("Calculating project weights...", "INFO")
+        print("Curing some cancer along the way...")
+    # Calculate project weights w/ credit/hr
+    final_project_weights = {}
+    dev_project_weights = {}
+    # Canonicalize PREFERRED_PROJECTS list
+    to_del = []
+    for url in preferred_projects.keys():
+        weight = preferred_projects[url]
+        canonicalized = resolve_url_database(url)
+        if canonicalized != url:
+            to_del.append(url)
+        preferred_projects[canonicalized] = weight
+    for url in to_del:
+        del preferred_projects[url]
+    # Ignore unattached projects if requested
+    if ignore_unattached:
+        for project in approved_project_urls:
+            boincified_url = resolve_url_boinc_rpc(
+                project,
+                known_attached_projects=known_attached_projects,
+                known_attached_projects_dev=known_attached_projects_dev,
+                known_boinc_projects=known_boinc_projects,
+            )
+            if boincified_url not in ATTACHED_PROJECT_SET:
+                ignored_projects.append(project)
+                log.warning(
+                    "Ignoring whitelisted project {} bc not attached".format(project)
+                )
+    combined_stats, unapproved_projects = add_mag_to_combined_stats(
+        combined_stats,
+        mag_ratios,
+        approved_project_urls,
+        list(preferred_projects.keys()),
+    )
+
+    # Detect attached projects which are not whitelisted or in PREFERRED_PROJECTS
+    if len(unapproved_projects) > 0:
+        if not quiet:
+            print(
+                "Warning: Projects below were found in your BOINC config but are not on the gridcoin approval list or your preferred projects list. If you want them to be given weight, be sure to add them to your preferred projects"
+            )
+            pprint.pprint(unapproved_projects)
+        log.warning(
+            "Warning: Projects below were found in your BOINC config but are not on the gridcoin approval list or your preferred projects list. If you want them to be given weight, be sure to add them to your preferred projects"
+            + str(unapproved_projects)
+        )
+    most_efficient_projects = get_most_mag_efficient_projects(
+        combined_stats, ignored_projects, quiet=quiet
+    )
+    if len(most_efficient_projects) == 0:
+        print_and_log(
+            "No projects have enough completed tasks to determine which is the most efficient. Assigning all projects 1",
+            "WARNING",
+        )
+        total_preferred_weight = (
+            1000 - (len(approved_project_urls)) + len(preferred_projects)
+        )
+        total_mining_weight = 0
+    else:
+        total_preferred_weight = (PREFERRED_PROJECTS_PERCENT / 100) * 1000
+        total_mining_weight = 1000 - total_preferred_weight
+    total_mining_weight_remaining = total_mining_weight
+    # Assign weight of 1 to all projects which didn't make the cut
+    for project_url in approved_project_urls:
+        preferred_extract = preferred_projects.get(project_url)
+        if preferred_extract:
+            continue  # Exclude preferred projects
+        if project_url in ignored_projects:
+            final_project_weights[project_url] = 0
+            dev_project_weights[project_url] = 0
+            continue
+        combined_stats_extract = combined_stats.get(project_url)
+        if not combined_stats_extract:
+            weak_stats.append(project_url)
+            continue
+        total_tasks = int(combined_stats_extract["COMPILED_STATS"]["TOTALTASKS"])
+        if total_tasks < 10:
+            weak_stats.append(project_url)
+            continue
+        if project_url not in most_efficient_projects or total_tasks < 10:
+            weak_stats.append(project_url)
+    # Assign weight of one to all project without enough stats
+    for project_url in weak_stats:
+        final_project_weights[project_url] = 1
+        total_mining_weight_remaining -= 1
+        dev_project_weights[project_url] = 0
+    if len(weak_stats) > 0:
+        if quiet:
+            log.debug(
+                "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: "
+                + str(weak_stats)
+            )
+        else:
+            print_and_log(
+                "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: ",
+                "INFO",
+            )
+            pprint.pprint(weak_stats)
+    # Figure out weight to assign to most efficient projects, assign it
+    if len(most_efficient_projects) == 0:
+        per_efficient_project = 0
+        per_efficient_project_dev = 0
+    else:
+        per_efficient_project = total_mining_weight_remaining / len(
+            most_efficient_projects
+        )
+        per_efficient_project_dev = 1000 / len(most_efficient_projects)
+    if total_mining_weight_remaining > 0:
+        if not quiet:
+            print_and_log(
+                "Assigning "
+                + str(total_mining_weight_remaining)
+                + " weight to "
+                + str(len(most_efficient_projects))
+                + " mining projects which means "
+                + str(per_efficient_project)
+                + " per project ",
+                "INFO",
+            )
+    for project_url in most_efficient_projects:
+        if project_url not in final_project_weights:
+            final_project_weights[project_url] = 0
+            dev_project_weights[project_url] = 0
+        final_project_weights[project_url] += per_efficient_project
+        dev_project_weights[project_url] = per_efficient_project_dev
+    # Assign weight to preferred projects
+    for project_url, weight in preferred_projects.items():
+        final_project_weights_extract = final_project_weights.get(project_url)
+        preferred_project_weights_extract = preferred_projects.get(project_url, 0)
+        if not final_project_weights_extract:
+            final_project_weights[project_url] = 0
+        intended_weight = (
+            preferred_project_weights_extract / 100
+        ) * total_preferred_weight
+        final_project_weights[project_url] += intended_weight
+    return (
+        combined_stats,
+        final_project_weights,
+        total_preferred_weight,
+        total_mining_weight,
+        dev_project_weights,
+    )
+
+
+def actual_save_stats(db_dump: str, path: str) -> None:
+    """
+    Save a JSON database file. Normally saves to given path.txt unless the path is "stats"
+    in which case it saves to STAT_FILE
+    """
+    if path:
+        if path == "stats":
+            path = STAT_FILE
+    try:
+        with open(path, "w") as fp:
+            fp.write(db_dump)
+    finally:
+        pass
+
+
+def save_stats(database: Any, path: Union[str, None] = None) -> None:
+    """
+    Caching function to save a database. If the database
+    has changed, save it, otherwise don't.
+    """
+    if path is None:
+        path = "stats"
+    db_dump = json.dumps(database, default=json_default, sort_keys=True)
+    db_hash = hash(db_dump)
+    try:
+        if path in SAVE_STATS_DB:
+            if SAVE_STATS_DB[path] != db_hash:
+                log.debug("Saving DB {}".format(path))
+                actual_save_stats(db_dump, path)
+            else:
+                log.debug("Skipping save of DB {}".format(path))
+        else:
+            log.debug("Saving DB bc not in SAVE_STATS_DB {}".format(path))
+            actual_save_stats(db_dump, path)
+    except Exception as e:
+        log.error("Error saving db {}{}".format(path, e))
+    SAVE_STATS_DB[path] = db_hash
+
+
+# === Lifecycle ===
 
 
 def shutdown_dev_client(quiet: bool = False) -> None:
@@ -587,6 +1015,10 @@ def shutdown_dev_client(quiet: bool = False) -> None:
         dev_rpc_client = new_loop.run_until_complete(
             setup_connection(BOINC_IP, DEV_BOINC_PASSWORD, port=DEV_RPC_PORT)
         )  # Setup dev BOINC RPC connection
+        if dev_rpc_client is None:
+            if not quiet:
+                print_and_log("Dev client not running, no need to shutdown", "INFO")
+            return
         authorize_response = new_loop.run_until_complete(
             dev_rpc_client.authorize(DEV_BOINC_PASSWORD)
         )  # Authorize dev RPC connection
@@ -597,28 +1029,52 @@ def shutdown_dev_client(quiet: bool = False) -> None:
         log.error("Error shutting down dev client {}".format(e))
 
 
-async def undo_nnt_all_projects(rpc_client: libs.pyboinc.rpc_client) -> None:
+async def dev_cleanup(
+    rpc_client: Union[libs.pyboinc.rpc_client.RPCClient, None] = None,
+) -> None:
     """
-    Undo NNT all projects, return when done or if encountered errors
+    Cleanup dev installation after use to save disk space, be nice to projects
     @param rpc_client:
     @return:
     """
+    log.debug("in dev_cleanup")
+    attached_projects = []
+    if rpc_client is None:
+        try:
+            rpc_client = await setup_connection(BOINC_IP, DEV_BOINC_PASSWORD, port=DEV_RPC_PORT) # Setup dev BOINC RPC connection
+        except Exception as e:
+            log.error(
+                "Asked to connect to dev client in dev_cleanup but unable to: {}".format(
+                    e
+                )
+            )
+            return
+    if rpc_client is None:
+        log.error("In dev_cleanup not rpc_client x2")
+        return
     try:
-        project_status_reply = await rpc_client.get_project_status()
-        found_projects = []
-        for project in project_status_reply:
-            found_projects.append(project.master_url)
-        for project in found_projects:
-            req = ET.Element("project_allowmorework")
-            a = ET.SubElement(req, "project_url")
-            a.text = project
-            response = await rpc_client._request(req)
-            parsed = parse_generic(response)  # Returns True if successful
+        await rpc_client.authorize(DEV_BOINC_PASSWORD)
     except Exception as e:
-        log.error("Error Un-NNTing all projects: {}".format(e))
+        log.error("Error authorizing dev client in dev_cleanup: {}".format(e))
+    try:
+        await kill_all_unstarted_tasks(rpc_client, True, True)
+    except Exception as e:
+        log.error("Error killing all unstarted tasks in dev_cleanup: {}".format(e))
+    try:
+        attached_projects, names_dict = await get_attached_projects(rpc_client)
+    except Exception as e:
+        log.error("Error getting project list in in dev_cleanup: {}".format(e))
+    if isinstance(attached_projects, list):
+        for project in attached_projects:
+            log.debug("in dev_cleanup resetting project {}".format(project))
+            try:
+                await run_rpc_command(rpc_client, "project_reset", project)
+            except Exception as e:
+                log.error("Error resetting project in dev_cleanup: {}".format(project))
+    shutdown_dev_client()
 
 
-def safe_exit(arg1, arg2) -> None:
+def safe_exit(_, __) -> None:
     """Safely exit Find The Mag.
 
     Safely exit tool by saving database, restoring original user preferences,
@@ -691,7 +1147,7 @@ def safe_exit(arg1, arg2) -> None:
             os.remove(override_dest_path)
         except Exception as e:
             print_and_log(
-                "Error removing overritten BOINC preferences {}".format(e), "WARN"
+                "Error removing overritten BOINC preferences {}".format(e), "WARNING"
             )
 
     rpc_client = None
@@ -699,6 +1155,11 @@ def safe_exit(arg1, arg2) -> None:
         rpc_client = new_loop.run_until_complete(
             setup_connection(BOINC_IP, BOINC_PASSWORD, port=BOINC_PORT)
         )  # Setup dev BOINC RPC connection
+        if rpc_client is None:
+            print_and_log(
+                "Main BOINC client not running, cannot restore settings", "WARNING"
+            )
+            return
         authorize_response = new_loop.run_until_complete(
             rpc_client.authorize(BOINC_PASSWORD)
         )  # Authorize dev RPC connection
@@ -713,17 +1174,24 @@ def safe_exit(arg1, arg2) -> None:
                     run_rpc_command(rpc_client, "set_gpu_mode", LAST_KNOWN_CPU_MODE)
                 )
         except Exception as e:
-            log.error("Error restoring CPU crunching status in main client {}".format(e))
+            log.error(
+                "Error restoring CPU crunching status in main client {}".format(e)
+            )
         try:
             if LAST_KNOWN_GPU_MODE is not None:
                 new_loop.run_until_complete(
                     run_rpc_command(rpc_client, "set_gpu_mode", LAST_KNOWN_GPU_MODE)
                 )
         except Exception as e:
-            log.error("Error restoring GPU crunching status in main client {}".format(e))
+            log.error(
+                "Error restoring GPU crunching status in main client {}".format(e)
+            )
 
         if EXIT_NNT is not None:
-            print_and_log("Restoring: {}...".format("NNTing" if EXIT_NNT else "undo-NNTing"), "DEBUG")
+            print_and_log(
+                "Restoring: {}...".format("NNTing" if EXIT_NNT else "undo-NNTing"),
+                "DEBUG",
+            )
             try:
                 if EXIT_NNT:
                     new_loop.run_until_complete(nnt_all_projects(rpc_client))
@@ -741,122 +1209,6 @@ def safe_exit(arg1, arg2) -> None:
     except Exception as e:
         log.error("Error closing an event loop: {}".format(e))
     sys.exit()
-
-
-async def get_stats_helper(rpc_client: libs.pyboinc.rpc_client) -> list:
-    """
-    Return stats from BOINC client. Development on this is stalled due to BOINC not returning all stats + projects in testing.
-    """
-    return_value = []
-    reply = await run_rpc_command(rpc_client, "get_statistics")
-    if not reply:
-        log.error("Error getting boinc stats")
-        return return_value
-    if isinstance(reply, str):
-        log.info("BOINC appears to have no stats... :{}".format(reply))
-        return return_value
-    job_logs = await run_rpc_command(rpc_client, "get_old_results")
-    return reply
-
-
-async def get_task_list(rpc_client: libs.pyboinc.rpc_client) -> list:
-    """List of active, waiting, or paused BOINC tasks.
-
-    Return list of tasks from BOINC client which are not completed/failed. These
-    can be active tasks, tasks waiting to be started, or paused tasks.
-
-    Args:
-        rpc_client:
-
-    Returns:
-        List of BOINC tasks.
-    """
-    # Known task states
-    # 2: Active
-    return_value = []
-    reply = await run_rpc_command(rpc_client, "get_results")
-    if not reply:
-        log.error("Error getting boinc task list")
-        return return_value
-    if isinstance(reply, str):
-        log.info("BOINC appears to have no tasks...")
-        return return_value
-    for task in reply:
-        if task["state"] in [2]:
-            return_value.append(task)
-        else:
-            log.warning(
-                "Warning: Found unknown task state {}: {}".format(task["state"], task)
-            )
-    return return_value
-
-
-async def is_boinc_crunching(rpc_client: libs.pyboinc.rpc_client) -> bool:
-    """Check if BOINC is actively crunching tasks.
-
-    Queries BOINC client as to crunching status. Returns True is BOINC client
-    is crunching, false otherwise.
-
-    Args:
-        rpc_client:
-
-    Returns:
-        True if crunching, or False if not crunching or unsure.
-
-    Raises:
-        Exception: An error occured attempting to check the BOINC client crunching status.
-    """
-    try:
-        reply = await run_rpc_command(rpc_client, "get_cc_status")
-        task_suspend_reason = int(reply["task_suspend_reason"])
-        if task_suspend_reason != 0:
-            # These are documented at
-            # https://github.com/BOINC/boinc/blob/73a7754e7fd1ae3b7bf337e8dd42a7a0b42cf3d2/android/BOINC/app/src/main/java/edu/berkeley/boinc/utils/BOINCDefs.kt
-            log.debug(
-                "Determined BOINC client is not crunching task_suspend_reason: {}".format(
-                    task_suspend_reason
-                )
-            )
-            return False
-        if task_suspend_reason == 0:
-            log.debug(
-                "Determined BOINC client is crunching task_suspend_reason: {}".format(
-                    task_suspend_reason
-                )
-            )
-            return True
-        log.warning("Unable to determine if BOINC is crunching or not, assuming not.")
-        return False
-    except Exception as e:
-        print(
-            "Error checking if BOINC is crunching. If you continue to see this error, make sure BOINC is running"
-        )
-        log.error(
-            "Error checking if BOINC is crunching (in is_boinc_crunching: {}".format(e)
-        )
-        return False
-
-
-async def setup_connection(
-    boinc_ip: str = BOINC_IP, boinc_password: str = BOINC_PASSWORD, port: int = 31416
-) -> Union[libs.pyboinc.rpc_client.RPCClient, None]:
-    """Create BOINC RPC client connection.
-
-    Sets up a BOINC RPC client connection
-
-    Args:
-        boinc_ip:
-        boinc_password:
-        port:
-
-    Returns:
-
-    """
-    rpc_client = None
-    if not boinc_ip:
-        boinc_ip = "127.0.0.1"
-    rpc_client = await init_rpc_client(boinc_ip, boinc_password, port=port)
-    return rpc_client
 
 
 def temp_check() -> bool:
@@ -888,7 +1240,7 @@ def temp_check() -> bool:
         except Exception as e:
             print_and_log("Error checking temp: {}".format(e), "ERROR")
             return True
-    command_output = TEMP_FUNCTION()
+    command_output = TEMP_FUNCTION() if TEMP_FUNCTION is not None else None
     match = None
     if command_output:
         text = str(command_output)
@@ -910,1201 +1262,251 @@ def temp_check() -> bool:
     return True
 
 
-def update_fetch(
-    update_text: str = None, current_ver: float = None
-) -> Tuple[bool, bool, Union[str, None]]:
-    """Check if FindTheMag updates are avialable.
+def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> float:
+    global ENABLE_TEMP_CONTROL
+    global LAST_KNOWN_CPU_MODE
+    global CPU_MODE_DICT
+    global LAST_KNOWN_GPU_MODE
+    global GPU_MODE_DICT
+    global TEMP_SLEEP_TIME
+    global DATABASE
 
-    Check with FindTheMag repository on GitHub whether or not an update is
-    available. If avaialble, inform the user and provide some information.
-
-    Update checks are performed no often then once per week. Check times are
-    stored in the database for future reference.
-
-    Args:
-        update_text: Used for testing purposes. Default: None
-        current_ver: Added for testing purposes. Default: None
-
-    Returns:
-        A tuple consisting of:
-            A bool, set to True if and update is available.
-            A bool, set to True if the update is a security update.
-            A string containing update related information.
-
-    Raises:
-        Exception: An error occured when attempting to parse the retrieved update file.
-    """
-    update_return = False
-    return_string = ""
-    security_update_return = False
-
-    # Added for testing purposes
-    if update_text:
-        resp = update_text
+    # If we have enabled temperature control, verify that crunching is
+    # allowed at current temp
+    if not ENABLE_TEMP_CONTROL:
+        return 0
+    # Get BOINC's starting CPU and GPU modes
+    existing_mode_info = loop.run_until_complete(
+        run_rpc_command(boinc_rpc_client, "get_cc_status")
+    )
+    existing_cpu_mode: str | None = None
+    existing_gpu_mode: str | None = None
+    if not existing_mode_info:
+        print_and_log("Error getting cc status to determine temp control", "ERROR")
+        if LAST_KNOWN_CPU_MODE:
+            existing_cpu_mode = LAST_KNOWN_CPU_MODE
+        if LAST_KNOWN_GPU_MODE:
+            existing_gpu_mode = LAST_KNOWN_GPU_MODE
     else:
-        resp = None
-    if not current_ver:
-        current_ver = VERSION
-
-    # If we've checked for updates in the last week, ignore
-    delta = datetime.datetime.now() - DATABASE.get(
-        "LASTUPDATECHECK", datetime.datetime(1997, 3, 3)
-    )
-    if abs(delta.days) < 7:
-        return False, False, None
-    # Get update status from Github
-    if not resp:
-        import requests as req
-
-        headers = req.utils.default_headers()
-        headers.update(
-            {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/104.0.0.0 Safari/537.36",
-            }
-        )
-        url = "https://raw.githubusercontent.com/makeasnek/FindTheMag2/main/updates.txt"
-        try:
-            resp = req.get(url, headers=headers, proxies=EXTERNAL_REQUEST_PROXIES).text
-        except Exception as e:
-            DATABASE["TABLE_STATUS"] = "Error checking for updates {}".format(e)
-            log.error("Error checking for updates {}".format(e))
-            return False, False, None
-        if "UPDATE FILE FOR FINDTHEMAG DO NOT DELETE THIS LINE" not in resp:
-            DATABASE["TABLE_STATUS"] = "Error checking for updates invalid update file"
-            log.error("Error checking for updates invalid update file")
-            return False, False, None
-    try:
-        for line in resp.splitlines():
-            if line.startswith("#"):
-                continue
-            if line == "":
-                continue
-            if "," not in line:
-                continue
-            split = line.split(",")
-            version = float(split[0])
-            if split[1] == "1":
-                security = True
-            else:
-                security = False
-            notes = split[2]
-            if version > current_ver:
-                if security:
-                    security_update_return = True
-                    update_return = True
-                    return_string = (
-                        return_string
-                        + "Version {} available. This is an important security update. Changes include {}\n".format(
-                            version, notes
-                        )
-                    )
-                else:
-                    update_return = True
-                    return_string = (
-                        return_string
-                        + "Version {} available. Changes include {}\n".format(
-                            version, notes
-                        )
-                    )
-    except Exception as e:
-        log.error("Error parsing update file")
-    DATABASE["LASTUPDATECHECK"] = datetime.datetime.now()
-    if return_string == "":
-        return_string = None
-    return update_return, security_update_return, return_string
-
-
-def update_check() -> None:
-    """Check if FindTheMag updates are avialable.
-
-    Check for updates to the FindTheMag tool and logs information on any updates found.
-    """
-    available, security, print_me = update_fetch()
-    if available:
-        print_and_log(print_me, "INFO")
-
-
-def get_grc_price(sample_text: str = None) -> Union[float, None]:
-    """
-    Gets average GRC price from three online sources. Returns None if unable to determine
-    @sample_text: Used for testing. Just a "view source" of all pages added together
-    """
-    """Retrieve current average Gridcoin price.
-
-    Calculates the average GRC price based on values from three online sources.
-
-    Note: Retrieving the prices is dependent on the target website formatting. If the
-    source website changes significantly, retrieval may fail until the relevant 
-    search pattern in updated.
-
-    Args:
-        sample_text: Used for testing. 
-                     Typicaly a "view source" of all pages added together.
-
-    Returns:
-        Average GCR price in decimal, or None if unable to determine price.
-
-    Raises:
-        Exception: An error occurred accessing an online GRC price source.
-    """
-    price, table_message, url_messages, info_log_messages, error_log_messages = (
-        get_grc_price_from_sites(proxies=EXTERNAL_REQUEST_PROXIES)
-    )
-
-    for log_message in info_log_messages:
-        log.info(log_message)
-
-    for log_message in error_log_messages:
-        log.error(log_message)
-
-    if price:
-        DATABASE["TABLE_STATUS"] = table_message
-
-        for url_message in url_messages:
-            print_and_log(url_message, "ERROR")
-
-        return price
-
-    DATABASE["TABLE_STATUS"] = table_message
-
-    for url_message in url_messages:
-        print_and_log(url_message, "ERROR")
-
-    return DATABASE.get("GRCPRICE", 0)
-
-
-def get_currency_rate(
-    currency_code: str, sample_text: str = None
-) -> Union[float, None]:
-    """
-    Gets average currency exchange rate from online sources. Returns None if unable to determine
-    @sample_text: Used for testing. Just a "view source" of all pages added together
-    """
-    """Retrieve current average currency exchange rate.
-
-    Calculates the average currency exchange rate based on values from three online sources.
-
-    Note: Retrieving the prices is dependent on the target website formatting. If the
-    source website changes significantly, retrieval may fail until the relevant 
-    search pattern in updated.
-
-    Args:
-        sample_text: Used for testing. 
-                     Typicaly a "view source" of all pages added together.
-
-    Returns:
-        Average currency exchange rate in decimal, or None if unable to determine price.
-
-    Raises:
-        Exception: An error occurred accessing an online currency exchange rate source.
-    """
-    price, table_message, url_messages, info_log_messages, error_log_messages = (
-        get_currency_from_sites(currency_code, proxies=EXTERNAL_REQUEST_PROXIES)
-    )
-
-    for log_message in info_log_messages:
-        log.info(log_message)
-
-    for log_message in error_log_messages:
-        log.error(log_message)
-
-    if price:
-        DATABASE["TABLE_STATUS"] = table_message
-
-        for url_message in url_messages:
-            print_and_log(url_message, "ERROR")
-
-        return price
-
-    DATABASE["TABLE_STATUS"] = table_message
-
-    for url_message in url_messages:
-        print_and_log(url_message, "ERROR")
-
-    return DATABASE.get(f"CURRENCY_{currency_code}", 1)
-
-
-def get_approved_project_urls_web(query_result: str = None) -> Dict[str, str]:
-    """List of projects currently witelised by Gridcoin.
-
-    Gets current whitelist from the Gridcoinstats website. Limits fetching
-    from website to once every 24 hours through caching list in database.
-
-    Args:
-        query_result: Used for testing.
-
-    Returns:
-        A dictionary mapping base URLs to project names.
-
-    Raises:
-        Exception: An error occurred fetching stats data from the website.
-        Exception: An error occurred parsing data from the source website.
-    """
-    # Check if cache is available
-    if "GSPROJECTLIST" in DATABASE and "GSRESOLVERDICT" in DATABASE:
-        cache_available = True
-    else:
-        cache_available = False
-    # Return cached version if we have it and requested it < 24 hrs ago
-    delta = datetime.datetime.now() - DATABASE.get(
-        "LASTGRIDCOINSTATSPROJECTCHECK", datetime.datetime(1993, 3, 3)
-    )
-    if abs(delta.days) < 1 and cache_available:
-        log.debug("Returning cached version of gridcoinstats data")
-        return DATABASE["GSRESOLVERDICT"]
-
-    # Otherwise, request it
-    import json
-
-    if not query_result:
-        import requests as req
-
-        url = "https://www.gridcoinstats.eu/API/simpleQuery.php?q=listprojects"
-        try:
-            resp = req.get(url, proxies=EXTERNAL_REQUEST_PROXIES)
-        except Exception as e:
-            print("Error fetching magnitude stats from {}".format(url))
-            log.error("Error fetching magnitude stats from {}: {}".format(url, e))
-            if cache_available:
-                return DATABASE["GSRESOLVERDICT"]
-            else:
-                log.debug("Exiting safely")
-                safe_exit(None, None)
+        existing_cpu_mode = existing_mode_info["task_mode"]
+        if existing_cpu_mode in CPU_MODE_DICT:
+            existing_cpu_mode = CPU_MODE_DICT[existing_cpu_mode]
+            LAST_KNOWN_CPU_MODE = existing_cpu_mode
         else:
-            if "BOINC" not in resp.text.upper():
-                log.error("Error fetching magnitude stats from {}".format(url))
-                if cache_available:
-                    log.debug("Returning cached magnitude stats")
-                    return DATABASE["GSRESOLVERDICT"]
-                else:
-                    log.debug("Exiting safely")
-                    safe_exit(None, None)
-            query_result = resp.text
-
-    # Parse what we got back
-    return_list: List[str] = []
-    project_resolver_dict: Dict[str, str] = {}
-    loaded_json = {}
-    try:
-        loaded_json = json.loads(query_result)
-    except Exception as e:
-        log.error("Error parsing data from Gridcoinstats {}".format(e))
-        if cache_available:
-            log.error("Returning old gridcoinstats data".format(e))
-            return DATABASE["GSRESOLVERDICT"]
-        else:
-            print("Unable to continue...")
-            safe_exit(None, None)
-    for projectname, project in loaded_json.items():
-        project_resolver_dict[projectname] = resolve_url_database(project["base_url"])
-    DATABASE["LASTGRIDCOINSTATSPROJECTCHECK"] = datetime.datetime.now()
-    DATABASE["GSPROJECTLIST"] = return_list
-    DATABASE["GSRESOLVERDICT"] = project_resolver_dict
-    return project_resolver_dict
-
-
-def stuck_xfer(xfer: dict) -> bool:
-    """
-    Checks if a xfer is stuck. Returns True if so, false if unable to determine or is stuck
-    @param xfer: xfer from xfers-happening
-    @return:
-    """
-    try:
-        if "status" not in xfer:
-            return False
-        if "persistent_file_xfer" in xfer:
-            if float(xfer["persistent_file_xfer"].get("num_retries", 0)) > 0:
-                return True
-    except Exception as e:
-        log.error("Error in stuck_xfer: {}".format(e))
-    return False
-
-
-def xfers_happening(xfer_list: list) -> bool:
-    """Confirms whether or not the BOINC client has any active transfers.
-
-    Checks list of transfers for any that are active.
-
-    Args:
-        xfer_list: List of transfers.
-
-    Returns:
-        True if any active xfers are happening, False if none are happening, or
-        if only stalled xfers exist, or if unable to determine.
-
-    Raises:
-        Exception: An error occurred parsing entry in transfer list.
-    """
-    # Known statuses:
-    # 0 = Active
-    # 1 = happens with stalled xfers, may happen in other scenarios as well
-    if isinstance(xfer_list, str):
-        return False
-    try:
-        for xfer in xfer_list:
-            if stuck_xfer(xfer):  # ignore stuck xfers
-                continue
-            if str(xfer["status"]) == "0":
-                return True
-            else:
-                log.warning("Found xfer with unknown status: " + str(xfer))
-        return False
-    except Exception as e:
-        log.error("Error parsing xfers: {}:{}".format(xfer_list, e))
-    return False
-
-
-def wait_till_no_xfers(rpc_client: libs.pyboinc.rpc_client) -> None:
-    """Wait on BOINC client to finish all pending transfers.
-
-    Wait for BOINC to finish all pending xfers, return None when done
-
-    Args:
-        rpc_client: Connection to BOINC client instance.
-
-    Raises:
-        Exception: An error occurred attempting to communicate with the BOINC client.
-    """
-    max_loops = 30
-    current_loops = 0
-    loop_wait_in_seconds = 30  # Wait this long between loops
-    # Every ten seconds we will request the list of file transfers from BOINC until
-    # there are none left.
-    while current_loops < max_loops:
-        current_loops += 1
-        # Ask BOINC for a list of file transfers
-        allow_response = None
-        cleaned_response = ""
-        try:
-            allow_response = loop.run_until_complete(
-                run_rpc_command(rpc_client, "get_file_transfers")
-            )
-        except Exception as e:
-            log.error(
-                "Error w/ wait_till_no_xfers,allow respponse exception {}".format(e)
-            )
-            sleep(loop_wait_in_seconds)
-            continue
-        if not allow_response:
-            log.error("Error w/ wait_till_no_xfers, no allow_response")
-            sleep(loop_wait_in_seconds)
-            continue
-        if isinstance(allow_response, str):
-            cleaned_response = re.sub(r"\s*", "", allow_response)
-            if cleaned_response == "":  # There are no transfers, yay!
-                return
-        if xfers_happening(allow_response):
-            log.debug("xfers happening: {}".format(str(allow_response)))
-            sleep(loop_wait_in_seconds)
-            continue
-        else:
-            return
-
-
-def get_gridcoin_config_parameters(gridcoin_dir: str) -> Dict[str, str]:
-    """Retrive Gridcoin wallet configuration.
-
-       Parses Gridcoin configuration .json and .conf file for configuration parameters.
-       Preference is given to those in the json file over those in the to the conf file.
-
-       Note that sidestakes become a list as there may be multiple.
-
-    Args:
-        gridcoin_dir: Absolute path to a gridcoin config directory.
-
-    Returns:
-        A dictionary of all config parameters found,
-
-    Raises:
-        Exception: An error occurred while parsing the config file.
-    """
-    return_dict = dict()
-    dupes = {}
-    if "gridcoinsettings.json" in os.listdir(gridcoin_dir):
-        with open(os.path.join(gridcoin_dir, "gridcoinsettings.json")) as json_file:
-            config_dict = json.load(json_file)
-            if "rpcuser" in config_dict:
-                return_dict["rpc_user"] = config_dict["rpcuser"]
-            if "rpcpass" in config_dict:
-                return_dict["rpc_pass"] = config_dict["rpcpass"]
-            if "rpcport" in config_dict:
-                return_dict["rpc_port"] = config_dict["rpcport"]
-    if "gridcoinresearch.conf" in os.listdir(gridcoin_dir):
-        with open(os.path.join(gridcoin_dir, "gridcoinresearch.conf")) as f:
-            for line in f:
-                if line.startswith("#"):
-                    continue
-                if line.strip() == "":
-                    continue
-                try:
-                    key = line.split("=")[0]
-                    value = line.split("=")[1].replace("\n", "")
-                    if "#" in value:
-                        value = value.split("#")[0]
-                    value = value.strip()
-                except Exception as e:
-                    log.error(
-                        "Warning: Error parsing line from config file, ignoring: {} error was {}".format(
-                            line, e
-                        )
-                    )
-                    continue
-                if key == "addnode":
-                    continue
-                if key == "sidestake":
-                    if "sidestake" not in return_dict:
-                        return_dict["sidestake"] = []
-                    return_dict["sidestake"].append(value)
-                    continue
-                if key in return_dict:
-                    if key not in dupes:
-                        dupes[key] = set()
-                    dupes[key].add(value)
-                    continue
-                if key not in return_dict:
-                    return_dict[key] = value
-    for key, value in dupes.items():
-        if len(value) > 1:
             print_and_log(
-                "Warning: multiple values found for "
-                + key
-                + " in gridcoin config file at "
-                + os.path.join(gridcoin_dir, "gridcoinresearch.conf")
-                + " using the first one we found",
-                "WARNING",
+                "Error: Unknown cpu mode {}".format(existing_cpu_mode), "ERROR"
             )
-
-    return return_dict
-
-
-def check_sidestake(
-    config_params: Dict[str, Union[str, List[str]]], address: str, minval: float
-) -> bool:
-    """Confirms whether or not the given address is being adequately sidestaked.
-
-    Checks if a given address is being sidestaked to or not. Returns False if value < minval
-
-    Args:
-        config_params: config_params from get_config_parameters
-        address: address to check
-        minval: minimum value to pass check
-
-    Returns:
-        True if given address is sidestaked for more than the given minium.
-    """
-    if "enablesidestaking" not in config_params:
-        return False
-    if "sidestake" not in config_params:
-        return False
-    if config_params["enablesidestaking"] != "1":
-        return False
-    for sidestake in config_params["sidestake"]:
-        found_address = sidestake.split(",")[0]
-        found_value = float(sidestake.split(",")[1])
-        if found_address == address:
-            if found_value >= minval:
-                return True
-    return False
-
-
-def project_url_from_stats_file(statsfilename: str) -> str:
-    """Guess a projec url using stats file name.
-
-    Guess a project URL from the name of a stats file.
-
-    Args:
-        statsfilename:
-
-    Returns:
-        URL for project associated with stats file, or stats file name if URL unknown.
-    """
-    # Remove extraneous information from name
-    statsfilename = statsfilename.replace("job_log_", "")
-    statsfilename = statsfilename.replace(".txt", "")
-    statsfilename = statsfilename.replace("_", "/")
-    return resolve_url_database(statsfilename)
-
-
-def project_url_from_credit_history_file(filename: str) -> str:
-    """Guess a project URL using credit history file name
-
-    Guess a project URL from credit history file name.
-
-    Args:
-        filename:
-
-    Returns:
-        URL for project associated with stats file, or credit history
-        file name if URL unknown.
-    """
-    filename = filename.replace("statistics_", "")
-    filename = filename.replace(".xml", "")
-    filename = filename.replace("_", "/")
-    return resolve_url_database(filename)
-
-
-def stat_file_to_list(
-    stat_file_abs_path: str = None, content: str = None
-) -> List[Dict[str, str]]:
-    """Retrieve a list of tasks and related stats from BOINC client log file.
-
-    Turns a BOINC job log into list of dictionaries we can use, each dictionary
-    is a task.
-    Dictionaries have the following keys:
-        STARTTIME,ESTTIME,CPUTIME,ESTIMATEDFLOPS,TASKNAME,WALLTIME,EXITCODE
-
-    Note that ESTIMATEDFLOPS comes from the project and EXITCODE will always be zero.
-    All values and keys in dicts are strings.
-
-    BOINC's job log format is:
-        [ue]	Estimated runtime	BOINC Client estimate (seconds)
-        [ct]	CPU time		Measured CPU runtime at completion (seconds)
-        [fe]	Estimated FLOPs count	From project (integer)
-        [nm]	Task name		From project
-        [et]	Elapsed time 		Wallclock runtime at completion (seconds)
-
-    Args:
-        stat_file_abs_path: BOINC client statistics log file with absolute path
-        content: Added for testing purposes.
-
-    Returns:
-        List dictionaries, each a BOINC task with statistics.
-
-    Raises:
-        Exception: An error occurred when attempting to read a BOINC job log file.
-        Exception: An error occurred when attempting to parse a BOINC job log file.
-    """
-    stats_list = []
-    try:
-        if not content:
-            content = open(stat_file_abs_path, mode="r", errors="ignore").read()
-        for log_entry in content.splitlines():
-            # log.debug('Found logentry '+str(log_entry))
-            match = None
-            try:
-                match = re.search(
-                    r"(\d*)( ue )([\d\.]*)( ct )([\d\.]*)( fe )(\d*)( nm )(\S*)( et )([\d\.]*)( es )(\d)",
-                    log_entry,
-                )
-            except Exception as e:
-                print_and_log(
-                    "Error reading BOINC job log at "
-                    + stat_file_abs_path
-                    + " maybe it's corrupt? Line: {} error: {}".format(log_entry, e),
-                    "ERROR",
-                )
-            if not match:
-                print_and_log(
-                    "Encountered log entry in unknown format: " + log_entry, "ERROR"
-                )
-                continue
-            stats = dict()
-            stats["STARTTIME"] = match.group(1)
-            stats["ESTTIME"] = match.group(3)
-            stats["CPUTIME"] = match.group(5)
-            stats["ESTIMATEDFLOPS"] = match.group(7)
-            stats["TASKNAME"] = match.group(9)
-            stats["WALLTIME"] = match.group(11)
-            stats["EXITCODE"] = match.group(13)
-            stats_list.append(stats)
-        return stats_list
-    except Exception as e:
-        print_and_log(
-            "Error reading BOINC job log at "
-            + stat_file_abs_path
-            + " maybe it's corrupt? "
-            + str(e),
-            "ERROR",
-        )
-        return []
-
-
-async def run_rpc_command(
-    rpc_client: libs.pyboinc.rpc_client,
-    command: str,
-    arg1: Union[str, None] = None,
-    arg1_val: Union[str, None] = None,
-    arg2: Union[str, None] = None,
-    arg2_val: Union[str, None] = None,
-) -> Union[str, Dict[Any, Any], List[Any]]:
-    """Send command to BOINC client via RPC
-
-    Runs command on BOINC client via RPC
-    Example: run_rpc_command(rpc_client,'project_nomorework','http://project.com/project')
-
-    Attempts to communicate with the BOINC client multiple times based on internal
-    parameters.
-
-    Args:
-        rpc_client: Connection to BOINC client instance.
-        command: Command to be executed by the BOINC client.
-        arg1: Optional parameter for BOINC command.
-        arg1_val: Value for optional parameter.
-        arg2: Optional parameter for BOINC command.
-        arg2_val: Value for optional parameter.
-
-    Returns:
-        Response from BOINC client, or None if unsuccessful.
-
-    Raises:
-        Exception: An error occurred attempting to communicated with the BOINC client.
-    """
-    max_retries = 3
-    retry_wait = 5
-    current_retries = 0
-
-    while current_retries < max_retries:
-        current_retries += 1
-        sleep(retry_wait)
-        full_command = "{} {} {} {} {}".format(
-            command, arg1, arg1_val, arg2, arg2_val
-        )  # added for debugging purposes
-        log.debug("Running BOINC rpc request " + full_command)
-        req = ET.Element(command)
-        if arg1 is not None:
-            a = ET.SubElement(req, arg1)
-            if arg1_val is not None:
-                a.text = arg1_val
-        if arg2 is not None:
-            b = ET.SubElement(req, arg2)
-            if arg2_val is not None:
-                b.text = arg2_val
-        try:
-            response = await rpc_client._request(req)
-            parsed = parse_generic(response)
-            if not str(parsed):
-                print_and_log(
-                    "Warning: Error w RPC command {}: {}".format(full_command, parsed),
-                    "ERROR",
-                )
-                continue
-        except Exception as e:
-            log.error("Error w RPC command {} {}".format(full_command, e))
-            continue
+        existing_gpu_mode = str(existing_mode_info["gpu_mode"])
+        if existing_gpu_mode in GPU_MODE_DICT:
+            existing_gpu_mode = GPU_MODE_DICT[existing_gpu_mode]
+            LAST_KNOWN_GPU_MODE = existing_gpu_mode
         else:
-            return parsed
-
-
-def credit_history_file_to_list(credithistoryfileabspath: str) -> List[Dict[str, str]]:
-    """Retrieve BOINC credit history
-
-    Turns a BOINC credit history file into list of dictionaries we can use.
-
-    Dictionaries have keys below:
-        TIME,USERTOTALCREDIT,USERRAC,HOSTTOTALCREDIT,HOSTRAC
-
-    Note that ESTIMATEDFLOPS comes from the project and EXITCODE will always be zero.
-
-    Args:
-        credithistoryfileabspath: Filename with absolute path.
-
-    Returns:
-        List of dicionaries with the following keys:
-            TIME,USERTOTALCREDIT,USERRAC,HOSTTOTALCREDIT,HOSTRAC
-
-    Raises:
-        Exception: An error occurred attempting to read and parse the credit history file.
-    """
-    statslist = []
-    try:
-        with open(
-            credithistoryfileabspath, mode="r", encoding="ASCII", errors="ignore"
-        ) as f:
-            parsed = xmltodict.parse(f.read())
-            for logentry in parsed.get("project_statistics", {}).get(
-                "daily_statistics", []
-            ):
-                stats = {}
-                if not isinstance(logentry, dict):
-                    continue
-                stats["TIME"] = logentry["day"]
-                stats["USERTOTALCREDIT"] = logentry["user_total_credit"]
-                stats["USERRAC"] = logentry["user_expavg_credit"]
-                stats["HOSTTOTALCREDIT"] = logentry["host_total_credit"]
-                stats["HOSTRAC"] = logentry["host_expavg_credit"]
-                statslist.append(stats)
-    except Exception as e:
-        log.error("Error reading statsfile {} {}".format(credithistoryfileabspath, e))
-    return statslist
-
-
-def parse_stats_file(
-    stat_list: List[Dict[str, str]],
-) -> Dict[str, Dict[str, Union[str, float, int]]]:
-    """
-
-    @param stat_list: output from stat_file_to_list
-    @return:
-    """
-    try:
-        wu_history = {}
-        for wu in stat_list:
-            date = str(
-                datetime.datetime.fromtimestamp(float(wu["STARTTIME"])).strftime(
-                    "%m-%d-%Y"
-                )
+            print_and_log(
+                "Error: Unknown gpu mode {}".format(existing_gpu_mode), "ERROR"
             )
-            if date not in wu_history:
-                wu_history[date] = {
-                    "TOTALWUS": 0,
-                    "total_wall_time": 0,
-                    "total_cpu_time": 0,
-                }
-            wu_history[date]["TOTALWUS"] += 1
-            wu_history[date]["total_wall_time"] += float(wu["WALLTIME"])
-            wu_history[date]["total_cpu_time"] += float(wu["CPUTIME"])
-    except Exception as e:
-        log.error("Error in parse_stats_file: {}".format(e))
+    if not existing_cpu_mode or not existing_gpu_mode:
+        return 0
+    # If temp is too high:
+    if temp_check():
+        return 0
+    elapsed = 0
+    while True:  # Keep sleeping until we pass a temp check
+        log.debug("Sleeping due to temperature")
+        # Put BOINC into sleep mode, automatically reverting if
+        # script closes unexpectedly
+        sleep_interval = str(int(((60 * TEMP_SLEEP_TIME) + 60)))
+        loop.run_until_complete(
+            run_rpc_command(boinc_rpc_client, "set_run_mode", "never", sleep_interval)
+        )
+        loop.run_until_complete(
+            run_rpc_command(boinc_rpc_client, "set_gpu_mode", "never", sleep_interval)
+        )
+        DATABASE["TABLE_SLEEP_REASON"] = "Temperature"
+        update_table(dev_loop=dev_loop)
+        sleep(60 * TEMP_SLEEP_TIME)
+        elapsed += TEMP_SLEEP_TIME
+        if temp_check():
+            # Reset to initial crunching modes now that temp is satisfied
+            loop.run_until_complete(
+                run_rpc_command(boinc_rpc_client, "set_run_mode", existing_cpu_mode)
+            )
+            loop.run_until_complete(
+                run_rpc_command(boinc_rpc_client, "set_gpu_mode", existing_gpu_mode)
+            )
+            if (
+                sleep_reason := DATABASE.pop("TABLE_SLEEP_REASON", None)
+            ) != "Temperature":
+                DATABASE["TABLE_SLEEP_REASON"] = sleep_reason
+            update_table(dev_loop=dev_loop)
+            return elapsed
+
+
+def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
+    """
+    A function to sleep and update the DEVTIMECOUNTER
+    sleep_time: duration in minutes to sleep
+    dev_loop: True if we are in dev loop
+    """
+    log.debug("Sleeping for {}...".format(sleep_time))
+    elapsed = 0
+    next_save = 0
+    next_temp = 0
+    while elapsed < sleep_time:
+        if elapsed >= next_temp:
+            temp_sleep_time = temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
+            elapsed += temp_sleep_time
+            next_temp += temp_sleep_time + CYCLE_TEMP_TIME
+        sleep(60 * CYCLE_CHECK_TIME)
+        if loop.run_until_complete(is_boinc_crunching(boinc_rpc_client)):
+            if dev_loop:
+                DATABASE["DEVTIMETOTAL"] += CYCLE_CHECK_TIME
+            else:
+                DATABASE["FTMTOTAL"] += CYCLE_CHECK_TIME
+        elapsed += CYCLE_CHECK_TIME
+        # Save database every ten minutes
+        if elapsed >= next_save:
+            save_stats(DATABASE)
+            next_save += CYCLE_SAVE_TIME
+    # Save database at end of routine
+    save_stats(DATABASE)
+
+
+# === Dev Crunching ===
+
+
+def setup_dev_boinc() -> str:
+    """
+    Do initial setup of and start dev boinc client. Returns RPC password. Returns 'ERROR' if unable to start BOINC
+    """
+    # Check if dev BOINC directory exists, create if it doesn't
+    dev_path = os.path.abspath("DEVACCOUNT")
+    boinc_executable = "/usr/bin/boinc"
+    if "WINDOWS" in FOUND_PLATFORM.upper():
+        boinc_executable = "C:\\Program Files\\BOINC\\boinc.exe"
+    elif "DARWIN" in FOUND_PLATFORM.upper():
+        boinc_executable = "/Applications/BOINCManager.app/Contents/resources/boinc"
+    if not os.path.exists("DEVACCOUNT"):
+        os.mkdir(dev_path)
+
+    # Update settings to match user settings from main BOINC install
+    global_settings_path = os.path.join(BOINC_DATA_DIR, "global_prefs.xml")
+    override_path = os.path.join(BOINC_DATA_DIR, "global_prefs_override.xml")
+    override_dest_path = os.path.join(
+        os.path.join(os.getcwd(), "DEVACCOUNT"), "global_prefs_override.xml"
+    )
+    shutil.copy(global_settings_path, "DEVACCOUNT")
+    if os.path.exists(override_path):
+        shutil.copy(override_path, "DEVACCOUNT")
+        # Read in the file
+        with open(override_dest_path, "r") as file:
+            filedata = file.read()
+        # Replace the target string
+        if "<disk_max_used_gb>" in filedata:
+            filedata = re.sub(
+                "<disk_max_used_gb>[^<]*</disk_max_used_gb>",
+                "<disk_max_used_gb>5.000000</disk_max_used_gb>",
+                filedata,
+            )
+        else:
+            filedata = filedata.replace(
+                "<global_preferences>",
+                "<global_preferences><disk_max_used_gb>5.000000</disk_max_used_gb>",
+            )
+
+        # Write the file out again
+        with open(override_dest_path, "w") as file:
+            file.write(filedata)
     else:
-        return wu_history
-
-
-def calculate_credit_averages(my_stats: dict) -> Dict[str, Dict[str, float]]:
-    return_stats = {}
-    for project_url, parent_dict in my_stats.items():
-        return_stats[project_url] = {}
-        total_wus = 0
-        total_credit = 0
-        total_cpu_time = 0
-        total_wall_time = 0
-        x_day_wall_time = 0
-        for date, credit_history in parent_dict["CREDIT_HISTORY"].items():
-            total_credit += credit_history["CREDITAWARDED"]
-        for date, wu_history in parent_dict["WU_HISTORY"].items():
-            total_wus += wu_history["TOTALWUS"]
-            total_wall_time += wu_history["total_wall_time"]
-            split_date = date.split("-")
-            datetimed_date = datetime.datetime(
-                year=int(split_date[2]),
-                month=int(split_date[0]),
-                day=int(split_date[1]),
-            )
-            time_ago = datetime.datetime.now() - datetimed_date
-            days_ago = time_ago.days
-            if days_ago <= ROLLING_WEIGHT_WINDOW:
-                x_day_wall_time += wu_history["total_wall_time"]
-            total_cpu_time += wu_history["total_cpu_time"]
-        if total_wus == 0:
-            avg_wall_time = 0
-            avg_cpu_time = 0
-            avg_credit_per_task = 0
-            credits_per_hour = 0
+        text_file = open(override_dest_path, "w")
+        n = text_file.write(
+            "<global_preferences><disk_max_used_gb>5.000000</disk_max_used_gb></global_preferences>"
+        )
+        text_file.close()
+    boinc_arguments = [
+        boinc_executable,
+        "--allow_multiple_clients",
+        "--dir",
+        dev_path,
+        "--gui_rpc_port",
+        str(DEV_RPC_PORT),
+    ]
+    try:
+        boinc_result = subprocess.Popen(
+            boinc_arguments, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
+        )
+    except Exception as e:
+        print("Error launching client for dev crunching {}".format(e))
+        log.error("Error launching client for dev crunching {}".format(e))
+        return "ERROR"
+    sleep(6)
+    auth_location = os.path.join(dev_path, "gui_rpc_auth.cfg")
+    boinc_password = ""
+    try:
+        if os.path.exists(auth_location):
+            with open(auth_location, "r") as file:
+                data = file.read().rstrip()
+                if data != "":
+                    boinc_password = data
         else:
-            total_cpu_time = total_cpu_time / 60 / 60  # convert to hours
-            total_wall_time = total_wall_time / 60 / 60  # convert to hours
-            x_day_wall_time = x_day_wall_time / 60 / 60  # convert to hours
-            avg_wall_time = total_wall_time / total_wus
-            avg_cpu_time = total_cpu_time / total_wus
-            avg_credit_per_task = total_credit / total_wus
-            credits_per_hour = total_credit / (total_wall_time)
-        return_stats[project_url]["TOTALCREDIT"] = total_credit
-        return_stats[project_url]["AVGWALLTIME"] = avg_wall_time
-        return_stats[project_url]["AVGCPUTIME"] = avg_cpu_time
-        return_stats[project_url]["AVGCREDITPERTASK"] = avg_credit_per_task
-        return_stats[project_url]["TOTALTASKS"] = total_wus
-        return_stats[project_url]["TOTALWALLTIME"] = total_wall_time
-        return_stats[project_url]["TOTALCPUTIME"] = total_cpu_time
-        return_stats[project_url]["AVGCREDITPERHOUR"] = credits_per_hour
-        return_stats[project_url]["XDAYWALLTIME"] = x_day_wall_time
-        log.debug(
-            "For project {} this host has crunched {} WUs for {} total credit with an average of {} credits per WU. {} hours were spent on these WUs for {} credit/hr".format(
-                project_url.lower(),
-                total_wus,
-                round(total_credit, 2),
-                round(avg_credit_per_task, 2),
-                round((total_wall_time), 2),
-                round(credits_per_hour, 2),
-            )
-        )
-    return return_stats
-
-
-async def boinc_client_to_stats(
-    rpc_client: libs.pyboinc.rpc_client = None,
-) -> Union[Dict[str, Dict[str, Union[int, float, Dict[str, Union[float, str]]]]], None]:
-    """
-    Function to gather stats from the BOINC client. Currently not used due to pyBOINC not supporting some calls
-    :param rpc_client: BOINC RPC Client
-    :return: Dict of stats, or None if encounters errors
-    """
-    pass
-    # stats_result = None
-    # project_status_reply = None
-    # try:
-    #     stats_result = loop.run_until_complete(get_stats_helper(rpc_client))
-    # except Exception as e:
-    #     log.error(
-    #         "Error getting stats from BOINC in boinc_client_to_stats: {}".format(e)
-    #     )
-    # if not isinstance(stats_result, dict):
-    #     return None
-    # if "project_statistics" not in stats_result:
-    #     log.error(
-    #         "Error project_statistics not in stats_result: {}".format(stats_result)
-    #     )
-    #     return None
-    # for project in stats_result:
-    #     try:
-    #         # elapsed_time=task['active_task']['current_cpu_time'].seconds
-    #         name = task["name"]
-    #         # wu_name=task['wu_name']
-    #         project_url = task["project_url"].master_url
-    #         if "active_task" not in task or started:
-    #             if not quiet:
-    #                 print("Cancelling unstarted task {}".format(task))
-    #             log.debug("Cancelling unstarted task {}".format(task))
-    #             req = ET.Element("abort_result")
-    #             a = ET.SubElement(req, "project_url")
-    #             a.text = project_url
-    #             b = ET.SubElement(req, "name")
-    #             b.text = name
-    #             response = await rpc_client._request(req)
-    #             parsed = parse_generic(response)  # returns True if successful
-    #             a = "21"
-    #         else:
-    #             # print('Keeping task {}'.format(task))
-    #             log.debug("Keeping task {}".format(task))
-    #     except Exception as e:
-    #         log.error("Error ending task: {}: {}".format(task, e))
-    # # OLD FUNCTION
-    # stats_files: List[str] = []
-    # credit_history_files: List[str] = []
-    # return_stats = {}
-    # template_dict = {"CREDIT_HISTORY": {}, "WU_HISTORY": {}, "COMPILED_STATS": {}}
-    #
-    # # find files to search through, add them to lists
-    # try:
-    #     for file in os.listdir(config_dir_abs_path):
-    #         if "job_log" in file:
-    #             stats_files.append(os.path.join(config_dir_abs_path, file))
-    #         if file.startswith("statistics_") and file.endswith(".xml"):
-    #             credit_history_files.append(os.path.join(config_dir_abs_path, file))
-    # except Exception as e:
-    #     log.error("Error listing stats files: {}".format(e))
-    #     return {}
-    # log.debug("Found stats_files: " + str(stats_files))
-    # log.debug("Found historical credit info files at: " + str(credit_history_files))
-    #
-    # # Process stats files
-    # for statsfile in stats_files:
-    #     project_url = project_url_from_stats_file(os.path.basename(statsfile))
-    #     project_url = resolve_url_database(project_url)
-    #     if project_url not in return_stats:
-    #         return_stats[project_url] = copy.deepcopy(template_dict)
-    #     stat_list = stat_file_to_list(statsfile)
-    #     parsed = parse_stats_file(stat_list)
-    #     return_stats[project_url]["WU_HISTORY"] = parsed
-    #
-    # # process credit logs
-    # for credit_history_file in credit_history_files:
-    #     project_url = project_url_from_credit_history_file(
-    #         os.path.basename(credit_history_file)
-    #     )
-    #     project_url = resolve_url_database(project_url)
-    #     credithistorylist = credit_history_file_to_list(credit_history_file)
-    #
-    #     # add info from credit history files
-    #     for index, entry in enumerate(credithistorylist):
-    #         try:
-    #             # print('In credit_history_file for ' + project_url)
-    #             # startdate = str(datetime.datetime.fromtimestamp(float(credithistorylist[0]['TIME'])).strftime('%m-%d-%Y'))
-    #             # lastdate = str( datetime.datetime.fromtimestamp(float(credithistorylist[len(credithistorylist) - 1]['TIME'])).strftime('%m-%d-%Y'))
-    #             if (
-    #                 index == len(credithistorylist) - 1
-    #             ):  # Skip the last entry as it's already calculated at the previous entry
-    #                 continue
-    #             # quick sanity checks
-    #             if project_url not in return_stats:
-    #                 return_stats[project_url] = copy.deepcopy(template_dict)
-    #             if "CREDIT_HISTORY" not in return_stats[project_url]:
-    #                 return_stats[project_url]["CREDIT_HISTORY"] = {}
-    #             if "COMPILED STATS" not in return_stats[project_url]:
-    #                 return_stats[project_url]["COMPILED_STATS"] = {}
-    #
-    #             credit_history = return_stats[project_url]["CREDIT_HISTORY"]
-    #             next_entry = credithistorylist[index + 1]
-    #             current_time = float(entry["TIME"])
-    #             delta_credits = float(next_entry["HOSTTOTALCREDIT"]) - float(
-    #                 entry["HOSTTOTALCREDIT"]
-    #             )
-    #             # Add found info to combined average stats
-    #             date = str(
-    #                 datetime.datetime.fromtimestamp(float(current_time)).strftime(
-    #                     "%m-%d-%Y"
-    #                 )
-    #             )
-    #             if date not in credit_history:
-    #                 credit_history[date] = {}
-    #             if "CREDITAWARDED" not in credit_history[date]:
-    #                 credit_history[date]["CREDITAWARDED"] = 0
-    #             credit_history[date]["CREDITAWARDED"] += delta_credits
-    #         except Exception as e:
-    #             log.error("Error parsing credit history files: {}".format(e))
-    # # find averages
-    # found_averages = calculate_credit_averages(return_stats)
-    # for url, stats_dict in found_averages.items():
-    #     combine_dicts(return_stats[url]["COMPILED_STATS"], stats_dict)
-    # return return_stats
-
-
-def config_files_to_stats(
-    config_dir_abs_path: str,
-) -> Dict[str, Dict[str, Union[int, float, Dict[str, Union[float, str]]]]]:
-    """Extract BOINC statistics from all available log and stats files.
-
-    Identifies all job log and statistics files in the specified directory. Extracts
-    all stats from found files and constructs dictionaries of them.
-
-    Args:
-        config_dir_abs_path: Absolute path to BOINC data directory.
-
-    Returns:
-        Dictionary of statistics in format COMBINED_STATS_EXAMPLE in main.py, or
-        an empty dictionary if unable to retrieve a list of statistics files.
-
-    Raises:
-        Exception: An error occurred retrieving list of statistics files.
-        Exception: An error occurred parsing credit history files.
-    """
-    stats_files: List[str] = []
-    credit_history_files: List[str] = []
-    return_stats = {}
-    template_dict = {"CREDIT_HISTORY": {}, "WU_HISTORY": {}, "COMPILED_STATS": {}}
-
-    # Find files to search through, add them to lists
-    try:
-        for file in os.listdir(config_dir_abs_path):
-            if "job_log" in file:
-                stats_files.append(os.path.join(config_dir_abs_path, file))
-            if file.startswith("statistics_") and file.endswith(".xml"):
-                credit_history_files.append(os.path.join(config_dir_abs_path, file))
+            boinc_password = ""
     except Exception as e:
-        log.error("Error listing stats files: {}".format(e))
-        return {}
-    log.debug("Found stats_files: " + str(stats_files))
-    log.debug("Found historical credit info files at: " + str(credit_history_files))
-
-    # Process stats files
-    for statsfile in stats_files:
-        project_url = project_url_from_stats_file(os.path.basename(statsfile))
-        project_url = resolve_url_database(project_url)
-        if project_url not in return_stats:
-            return_stats[project_url] = copy.deepcopy(template_dict)
-        stat_list = stat_file_to_list(statsfile)
-        parsed = parse_stats_file(stat_list)
-        return_stats[project_url]["WU_HISTORY"] = parsed
-
-    # process credit logs
-    for credit_history_file in credit_history_files:
-        project_url = project_url_from_credit_history_file(
-            os.path.basename(credit_history_file)
-        )
-        project_url = resolve_url_database(project_url)
-        credithistorylist = credit_history_file_to_list(credit_history_file)
-
-        # Add info from credit history files
-        for index, entry in enumerate(credithistorylist):
-            try:
-                # print('In credit_history_file for ' + project_url)
-                # startdate = str(datetime.datetime.fromtimestamp(float(credithistorylist[0]['TIME'])).strftime('%m-%d-%Y'))
-                # lastdate = str( datetime.datetime.fromtimestamp(float(credithistorylist[len(credithistorylist) - 1]['TIME'])).strftime('%m-%d-%Y'))
-                if (
-                    index == len(credithistorylist) - 1
-                ):  # Skip the last entry as it's already calculated at the previous entry
-                    continue
-                # quick sanity checks
-                if project_url not in return_stats:
-                    return_stats[project_url] = copy.deepcopy(template_dict)
-                if "CREDIT_HISTORY" not in return_stats[project_url]:
-                    return_stats[project_url]["CREDIT_HISTORY"] = {}
-                if "COMPILED STATS" not in return_stats[project_url]:
-                    return_stats[project_url]["COMPILED_STATS"] = {}
-
-                credit_history = return_stats[project_url]["CREDIT_HISTORY"]
-                next_entry = credithistorylist[index + 1]
-                current_time = float(entry["TIME"])
-                delta_credits = float(next_entry["HOSTTOTALCREDIT"]) - float(
-                    entry["HOSTTOTALCREDIT"]
-                )
-                # Add found info to combined average stats
-                date = str(
-                    datetime.datetime.fromtimestamp(float(current_time)).strftime(
-                        "%m-%d-%Y"
-                    )
-                )
-                if date not in credit_history:
-                    credit_history[date] = {}
-                if "CREDITAWARDED" not in credit_history[date]:
-                    credit_history[date]["CREDITAWARDED"] = 0
-                credit_history[date]["CREDITAWARDED"] += delta_credits
-            except Exception as e:
-                log.error("Error parsing credit history files: {}".format(e))
-    # Find averages
-    found_averages = calculate_credit_averages(return_stats)
-    for url, stats_dict in found_averages.items():
-        combine_dicts(return_stats[url]["COMPILED_STATS"], stats_dict)
-    return return_stats
+        # This error can generally be disregarded on Linux/OSX
+        if "WINDOWS" in FOUND_PLATFORM.upper():
+            print("Error reading boinc RPC file at {}: {}".format(auth_location, e))
+            log.error("Error reading boinc RPC file at {}: {}".format(auth_location, e))
+        else:
+            log.debug("Error reading boinc RPC file at {}: {}".format(auth_location, e))
+    return boinc_password
 
 
-def add_mag_to_combined_stats(
-    combined_stats: dict,
-    mag_ratios: Dict[str, float],
-    approved_projects: List[str],
-    preferred_projects: List[str],
-) -> Tuple[dict, List[str]]:
-    """Adds magnitude ratios to combined statistics
-
-    Args:
-        combined_stats: COMBINED_STATS from main.py.
-        mag_ratios: Magnitude ratios returned from get_project_mag_ratios.
-            A dictionary with project URL as key and magnitude ratio as value
-        approved_projects:
-        preferred_projects:
-
-    Returns: A tuple consisting of:
-        COMBINED_STATS with magnitude ratios added to it,
-        list of projects which are being crunched but not on approved projects list.
+def owed_to_dev() -> float:
     """
-    unapproved_list = []
-    if not mag_ratios:
-        log.error(
-            "In add_mag_to_combined_ratios but mag_ratios is empty. Setting all mag ratios to zero."
-        )
-        mag_ratios = {}
-    for project_url, project_stats in combined_stats.items():
-        found_mag_ratio = mag_ratios.get(project_url, 0)
-        if not found_mag_ratio:
-            if project_url not in approved_projects:
-                if project_url not in preferred_projects:
-                    unapproved_list.append(project_url)
-            project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"] = 0
-            project_stats["COMPILED_STATS"]["MAGPERCREDIT"] = 0
-            continue
-        avg_credit_per_hour = 0
-        if "AVGCREDITPERHOUR" in project_stats["COMPILED_STATS"]:
-            avg_credit_per_hour = project_stats["COMPILED_STATS"]["AVGCREDITPERHOUR"]
-        project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"] = (
-            avg_credit_per_hour * found_mag_ratio
-        )
-        project_stats["COMPILED_STATS"]["MAGPERCREDIT"] = found_mag_ratio
-    return combined_stats, unapproved_list
+
+    @return: Hours currently owed to dev
+    """
+    total_time_in_hours = (max(DATABASE.get("FTMTOTAL", 0), 1) / 60) + max(
+        DATABASE.get("DEVTIMETOTAL", 0), 1
+    ) / 60
+    dev_time_in_hours = max(DATABASE.get("DEVTIMETOTAL", 0), 1) / 60
+    dev_owed_in_hours = max(0.01, DEV_FEE) * total_time_in_hours
+    discrepancy = dev_owed_in_hours - dev_time_in_hours
+    return discrepancy
 
 
-def is_project_eligible(project_url: str, project_stats: dict) -> bool:
-    """
-    Returns True if project is eligible based on completed tasks, IGNORED_PROJECTS. Returns True on error.
-    """
-    # Ignore projects and projects w less than 10 completed tasks are ineligible
-    if project_url in IGNORED_PROJECTS:
+def should_crunch_for_dev(dev_loop: bool) -> bool:
+    if dev_loop:
+        log.debug("Should not start dev crunching bc already in dev loop")
         return False
-    try:
-        if int(project_stats["COMPILED_STATS"]["TOTALTASKS"]) >= 10:
-            return True
-    except Exception as e:
-        log.error(
-            "Error in is_project_eligible for project {} {}".format(project_url, e)
+    if FORCE_DEV_MODE:
+        log.debug("Should start dev crunching bc FORCE_DEV_MODE")
+        return True
+    if CHECK_SIDESTAKE_RESULTS:
+        log.debug("Should skip dev mode bc CHECK_SIDESTAKE_RESULTS")
+        return False
+    discrepancy = owed_to_dev()
+    if discrepancy > 100:
+        log.debug(
+            "Should start dev crunching due to discrepancy: {}".format(discrepancy)
         )
         return True
+    log.debug("Should not start dev crunching, current owed is: {}".format(discrepancy))
     return False
 
 
-def get_first_non_ignored_project(
-    project_list: List[str], ignored_projects: List[str]
-) -> Union[str, None]:
-    return_value = None
-    for project in project_list:
-        if project not in ignored_projects:
-            return project
-    log.error("Error: No projects found in get_first_non_ignored_project")
-    return return_value
-
-
-def get_most_mag_efficient_projects(
-    combinedstats: dict,
-    ignored_projects: List[str],
-    percentdiff: int = 10,
-    quiet: bool = False,
-) -> List[str]:
-    """Determines most magnitude efficient project(s).
-
-    Given combinedstats, determines most mag efficient project(s). This is the #1
-    most efficient project and any other projects which are within percentdiff of
-    that number.
-
-    Args:
-        combinedstats: combinedstats dict
-        percentdiff: Maximum percent diff
-
-    Returns:
-        List of project URLs, or empty list if none are found.
-    """
-    return_list = []
-    highest_project = get_first_non_ignored_project(
-        list(combinedstats.keys()), ignored_projects
-    )
-    if not highest_project:
-        log.error("No highest project found in get_most_mag_efficient_project")
-        return []
-    # find the highest project
-    for project_url, project_stats in combinedstats.items():
-        if project_url in ignored_projects:
-            continue
-        current_mag_per_hour = project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"]
-        highest_mag_per_hour = combinedstats[highest_project]["COMPILED_STATS"][
-            "AVGMAGPERHOUR"
-        ]
-        if current_mag_per_hour > highest_mag_per_hour and is_project_eligible(
-            project_url, project_stats
-        ):
-            highest_project = project_url
-    if combinedstats[highest_project]["COMPILED_STATS"]["TOTALTASKS"] >= 10:
-        if not quiet:
-            print(
-                "\n\nHighest mag/hr project --with at least 10 completed WUs-- is {} w/ {}/hr of credit.".format(
-                    highest_project.lower(),
-                    combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPERHOUR"],
-                )
+def make_discrepancy_timeout(discrepancy: float) -> float:
+    timeout = discrepancy
+    if discrepancy < 0:
+        if FORCE_DEV_MODE:
+            timeout = 60
+        else:
+            timeout = 0
+            log.error(
+                "Discrepancy is < 0 this should not happen: {}".format(discrepancy)
             )
-        log.info(
-            "Highest mag/hr project //with at least 10 completed WUs// is {} w/ {}/hr of credit.".format(
-                highest_project,
-                combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPERHOUR"],
-            )
-        )
-    return_list.append(highest_project)
+    return timeout
 
-    # then compare other projects to it to see if any are within percentdiff of it
-    highest_avg_mag = combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPERHOUR"]
-    minimum_for_inclusion = highest_avg_mag - (highest_avg_mag * (percentdiff / 100))
-    for project_url, project_stats in combinedstats.items():
-        current_avg_mag = project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"]
-        if project_url == highest_project:
-            continue
-        if project_url in ignored_projects:
-            continue
-        if (
-            minimum_for_inclusion <= current_avg_mag
-            and is_project_eligible(project_url, project_stats)
-            and current_avg_mag != 0
-        ):
-            if not quiet:
-                print(
-                    "Also including this project because it's within {}% variance of highest mag/hr project: {}, mag/hr {}".format(
-                        percentdiff, project_url.lower(), current_avg_mag
-                    )
-                )
-            log.info(
-                "Also including this project because it's within {}% variance of highest mag/hr project: {}, mag/hr {}".format(
-                    percentdiff, project_url.lower(), current_avg_mag
-                )
-            )
-            return_list.append(project_url)
 
-    # If there is no highest project, return empty list
-    if len(return_list) == 1:
-        if combinedstats[highest_project]["COMPILED_STATS"]["TOTALTASKS"] < 10:
-            return_list.clear()
-    return return_list
+# === TUI ===
 
 
 def sidestake_prompt(
@@ -2187,184 +1589,6 @@ def sidestake_prompt(
             ),
             "ERROR",
         )
-
-
-def get_project_mag_ratios(
-    grc_client: Union[GridcoinClientConnection, None] = None,
-    lookback_period: int = 30,
-    response: dict = None,
-    grc_projects: Union[Dict[str, str], None] = None,
-) -> Union[Dict[str, float], None]:
-    """Retrieve magnitude to RAC ratios for each project from Gridcoin client.
-
-    Calculate the ratio of magnitude to RAC for each project the Gridcoin client
-    is aware of. Look back the number of specified superblocks for calculating the
-    average.
-
-    A cache of the results is maintained and used if the Grindcoin client is unavailable.
-
-    Args:
-        grc_client: Connection to Gridcoin client. If testing, set to None.
-        lookback_period: Number of superblocks to look back to determine average.
-        response: Used for testing purposes.
-        grc_projects: Set to None, unless for testing purposes. When testing
-            This is the output of the 'listprojects' command run on the Gridcoin client.
-
-    Returns:
-        A dictionary with the key as project URL and value as project magnitude ratio
-        (mag per unit of RAC).
-        A value of None is returned in the event of an exception and no cached data.
-
-    Raises:
-        Exception: An error occurred attempting to communicate with the Gridcoin client.
-    """
-    global PROJECT_MAG_RATIOS_CACHE
-    projects = {}
-    return_dict = None
-    try:
-        if not response:
-            command_result = grc_client.run_command(
-                "superblocks", [lookback_period, True]
-            )
-            response = command_result
-        if not response:
-            raise ConnectionError("Issues w superblocks command")
-        if not grc_projects:
-            grc_projects = grc_client.run_command("listprojects")["result"]
-        if not grc_projects:
-            raise ConnectionError("Issues w listproject command")
-        return_dict = get_project_mag_ratios_from_response(
-            response["result"], lookback_period, grc_projects
-        )
-        if DUMP_RAC_MAG_RATIOS:
-            save_stats(return_dict, "RAC_MAG_RATIOS")
-        return return_dict
-    except Exception as e:
-        if len(PROJECT_MAG_RATIOS_CACHE) > 0:
-            print_and_log(
-                "Error communicating with Gridcoin wallet {}, using cached data!".format(
-                    e
-                ),
-                "ERROR",
-            )
-            return PROJECT_MAG_RATIOS_CACHE
-        else:
-            print_and_log(
-                "Error communicating with Gridcoin wallet! {}".format(e), "ERROR"
-            )
-            return None
-
-
-def project_url_to_name_boinc(url: str, project_names: dict = None):
-    """Attempt to convert specified project URL to the project name.
-
-    This function is the same as project_url_to_name, except it returns names for
-    parsing BOINC logs.
-
-    Args:
-        url: URL of desired BOINC project.
-        project_names: Dictionary of project names with the key as the project URL,
-            from the BOINC client database..
-
-    Returns:
-        The human-readable project name associated with the specified URL, or
-        the converted specified URL if the project is not found.
-    """
-    if not project_names:
-        project_names = BOINC_PROJECT_NAMES
-    canonical_url = resolve_url_database(url)
-    for project_url, name in project_names.items():
-        if canonical_url in project_url or canonical_url == project_url:
-            return name
-    return url
-
-
-def project_url_to_name(url: str, project_names: Dict[str, str] = None):
-    """Attempt to convert specified project URL to the project name.
-
-    This function is of low importance and must only be used when printing the table.
-    Do NOT USE for any other purpose.
-
-    Args:
-        url: URL of desired BOINC project.
-        project_names: Dictionary of project names with the key as the project URL,
-            from the BOINC client database..
-
-    Returns:
-        The human-readable project name associated with the specified URL, or
-        the converted specified URL if the project is not found.
-    """
-    if not project_names:
-        project_names = BOINC_PROJECT_NAMES
-    canonical_url = resolve_url_database(url)
-    if url in PRINT_URL_LOOKUP_TABLE:
-        return PRINT_URL_LOOKUP_TABLE[url]
-    found = url
-    for project_url, name in project_names.items():
-        if canonical_url in project_url.upper() or canonical_url == project_url.upper():
-            found = name.lower().replace("@home", "").replace("athome", "")
-    PRINT_URL_LOOKUP_TABLE[url] = found
-    return found
-
-
-def left_align(yourstring: str, total_len: int, min_pad: int = 0) -> str:
-    """Left-aligns specified string using given length and padding.
-
-    Constructs a string of length total_len with yourstring left-aligned and
-    padded with spaces on the right. Padding includes at least min_pad spaces,
-    cutting off yourstring if required.
-
-    Example: ("examplestring", 15, 1) will create a string that looks like
-    this: 'examplestring  '.
-
-    Returns:
-        Left-aligned string of total_len with min_pad padding of spaces on the
-        right of the text.
-
-    TODO:
-        Confirm that returned string should be shorter than total_len based on
-        the value of min_pad, or should the length always be total_len.
-        Example ("yourstring",15,1) returns 'yourstring    ' where the length
-        is actually 14 instead 15.
-    """
-    if len(yourstring) >= total_len - min_pad:
-        yourstring = yourstring[0 : total_len - (min_pad)]
-    space_left = total_len - (len(yourstring) + min_pad)
-    right_pad = " " * (space_left + min_pad)
-    return yourstring + right_pad
-
-
-def center_align(yourstring: str, total_len: int, min_pad: int = 0) -> str:
-    """Center-aligns specified string using given length and padding.
-
-    Constructs a string of length total_len with yourstring center-aligned and
-    padded with spaces on the left and right. Padding includes at least min_pad
-    spaces, truncating yourstring if required.
-
-    If the padding can not be equal on both sides, then an additional +1 padding is
-    added to the right side.
-
-    Example: ("examplestring", 15, 1) will create a string that looks like
-    this: ' examplestring '.
-
-    Returns:
-        Center-aligned string of total_len with min_pad padding of spaces on the
-        left and right of the text.
-
-    TODO:
-        Confirm that returned string should be shorter than total_len based on
-        the value of min_pad, or should the length always be total_len.
-        Example ("yourstring",15,1) returns '  yourstring  ' where the length
-        is actually 14 instead 15.
-    """
-    total_min_pad = min_pad * 2
-    room_for_string = total_len - total_min_pad
-    if len(yourstring) >= room_for_string:
-        yourstring = yourstring[0:room_for_string]
-    space_left = total_len - len(yourstring)
-    left_pad = " " * floor(space_left / 2)
-    right_pad = " " * ceil(space_left / 2)
-    return left_pad + yourstring + right_pad
 
 
 def print_table(
@@ -2474,24 +1698,22 @@ def print_table(
                 revenue_per_day = (
                     (grc_per_day)
                     * DATABASE.get("GRCPRICE", 0)
-                    * DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)
+                    * DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
                 )
                 exchange_expenses = revenue_per_day * EXCHANGE_FEE
                 expenses_per_day = exchange_expenses + (HOST_COST_PER_HOUR * 24)
                 profit = revenue_per_day - expenses_per_day
                 rounded_revenue_per_day = str(
-                    round(
-                        revenue_per_day, ROUNDING_DICT.get(f"{CURRENCY_CODE}/DAY R", 3)
-                    )
+                    round(revenue_per_day, ROUNDING_DICT.get("USD/DAY R", 3))
                 )
                 rounded_profit_per_day = str(
-                    round(profit, ROUNDING_DICT.get(f"{CURRENCY_CODE}/DAY P", 3))
+                    round(profit, ROUNDING_DICT.get("USD/DAY P", 3))
                 )
-                working_dict[name][f"{CURRENCY_CODE}/DAY R/P"] = "{}/{}".format(
+                working_dict[name]["{}/DAY R/P".format(CURRENCY_CODE)] = "{}/{}".format(
                     rounded_revenue_per_day, rounded_profit_per_day
                 )
             else:
-                working_dict[name][f"{CURRENCY_CODE}/DAY R/P"] = "0"
+                working_dict[name]["{}/DAY R/P".format(CURRENCY_CODE)] = "0"
             del working_dict[name]["MAG/HR"]
 
     # figure out table headings
@@ -2510,7 +1732,9 @@ def print_table(
     # print header
     ## print first line
     print("*" * table_width)
-    print("*" + center_align("FINDTHEMAG V{}".format(VERSION), table_width - 2) + "*")
+    print(
+        "*" + center_align("FINDTHEMAG V{}".format(__version__), table_width - 2) + "*"
+    )
     print("*" * table_width)
 
     ## print rest of header
@@ -2552,7 +1776,7 @@ def print_table(
         left_align(
             "GRC Price: {:.6f}".format(
                 DATABASE.get("GRCPRICE", 0.00000)
-                * DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)
+                * DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
             ),
             total_len=19,
             min_pad=1,
@@ -2600,1321 +1824,11 @@ def print_table(
         "RWTIME is wall-time crunched during window (default is 60 days). Windows help FTM track changes in how projects award credit"
     )
     print(
-        f"{CURRENCY_CODE}/DAY R/P is revenue and profit per day in {CURRENCY_CODE}. Uses electrical costs from your user_config.py"
+        "{}/DAY R/P is revenue and profit per day in {}. Uses electrical costs from your user_config.py".format(
+            CURRENCY_CODE, CURRENCY_CODE
+        )
     )
     print("*" * table_width)
-
-
-def in_list(my_str: str, list: List[str]) -> bool:
-    search_str = resolve_url_database(my_str)
-    for item in list:
-        if search_str == item.upper() or search_str in item.upper():
-            return True
-    return False
-
-
-def generate_stats(
-    approved_project_urls: List[str],
-    preferred_projects: Dict[str, float] = None,
-    ignored_projects: List[str] = None,
-    quiet: bool = False,
-    ignore_unattached: bool = False,
-    attached_list: Set[str] = None,
-    mag_ratios: Dict[str, float] = None,
-):
-    if not attached_list:
-        attached_list = []
-    if not approved_project_urls:
-        approved_project_urls = APPROVED_PROJECT_URLS
-    if not mag_ratios:
-        mag_ratios = MAG_RATIOS
-    weak_stats = []
-    if not quiet:
-        print_and_log("Gathering project stats...", "INFO")
-    combined_stats = config_files_to_stats(BOINC_DATA_DIR)
-    if not quiet:
-        print_and_log("Calculating project weights...", "INFO")
-        print("Curing some cancer along the way...")
-    # Calculate project weights w/ credit/hr
-    final_project_weights = {}
-    dev_project_weights = {}
-    # Canonicalize PREFERRED_PROJECTS list
-    to_del = []
-    for url in preferred_projects.keys():
-        weight = preferred_projects[url]
-        canonicalized = resolve_url_database(url)
-        if canonicalized != url:
-            to_del.append(url)
-        preferred_projects[canonicalized] = weight
-    for url in to_del:
-        del preferred_projects[url]
-    # Ignore unattached projects if requested
-    if ignore_unattached:
-        for project in approved_project_urls:
-            boincified_url = resolve_url_boinc_rpc(project)
-            if boincified_url not in ATTACHED_PROJECT_SET:
-                ignored_projects.append(project)
-                log.warning(
-                    "Ignoring whitelisted project {} bc not attached".format(project)
-                )
-    combined_stats, unapproved_projects = add_mag_to_combined_stats(
-        combined_stats,
-        mag_ratios,
-        approved_project_urls,
-        list(preferred_projects.keys()),
-    )
-
-    # Detect attached projects which are not whitelisted or in PREFERRED_PROJECTS
-    if len(unapproved_projects) > 0:
-        if not quiet:
-            print(
-                "Warning: Projects below were found in your BOINC config but are not on the gridcoin approval list or your preferred projects list. If you want them to be given weight, be sure to add them to your preferred projects"
-            )
-            pprint.pprint(unapproved_projects)
-        log.warning(
-            "Warning: Projects below were found in your BOINC config but are not on the gridcoin approval list or your preferred projects list. If you want them to be given weight, be sure to add them to your preferred projects"
-            + str(unapproved_projects)
-        )
-    most_efficient_projects = get_most_mag_efficient_projects(
-        combined_stats, ignored_projects, quiet=quiet
-    )
-    if len(most_efficient_projects) == 0:
-        print_and_log(
-            "No projects have enough completed tasks to determine which is the most efficient. Assigning all projects 1",
-            "WARNING",
-        )
-        total_preferred_weight = (
-            1000 - (len(approved_project_urls)) + len(preferred_projects)
-        )
-        total_mining_weight = 0
-    else:
-        total_preferred_weight = (PREFERRED_PROJECTS_PERCENT / 100) * 1000
-        total_mining_weight = 1000 - total_preferred_weight
-    total_mining_weight_remaining = total_mining_weight
-    # Assign weight of 1 to all projects which didn't make the cut
-    for project_url in approved_project_urls:
-        preferred_extract = preferred_projects.get(project_url)
-        if preferred_extract:
-            continue  # Exclude preferred projects
-        if project_url in ignored_projects:
-            final_project_weights[project_url] = 0
-            dev_project_weights[project_url] = 0
-            continue
-        combined_stats_extract = combined_stats.get(project_url)
-        if not combined_stats_extract:
-            weak_stats.append(project_url)
-            continue
-        total_tasks = int(combined_stats_extract["COMPILED_STATS"]["TOTALTASKS"])
-        if total_tasks < 10:
-            weak_stats.append(project_url)
-            continue
-        if project_url not in most_efficient_projects or total_tasks < 10:
-            weak_stats.append(project_url)
-    # Assign weight of one to all project without enough stats
-    for project_url in weak_stats:
-        final_project_weights[project_url] = 1
-        total_mining_weight_remaining -= 1
-        dev_project_weights[project_url] = 0
-    if len(weak_stats) > 0:
-        if quiet:
-            log.debug(
-                "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: "
-                + str(weak_stats)
-            )
-        else:
-            print_and_log(
-                "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: ",
-                "INFO",
-            )
-            pprint.pprint(weak_stats)
-    # Figure out weight to assign to most efficient projects, assign it
-    if len(most_efficient_projects) == 0:
-        per_efficient_project = 0
-        per_efficient_project_dev = 0
-    else:
-        per_efficient_project = total_mining_weight_remaining / len(
-            most_efficient_projects
-        )
-        per_efficient_project_dev = 1000 / len(most_efficient_projects)
-    if total_mining_weight_remaining > 0:
-        if not quiet:
-            print_and_log(
-                "Assigning "
-                + str(total_mining_weight_remaining)
-                + " weight to "
-                + str(len(most_efficient_projects))
-                + " mining projects which means "
-                + str(per_efficient_project)
-                + " per project ",
-                "INFO",
-            )
-    for project_url in most_efficient_projects:
-        if project_url not in final_project_weights:
-            final_project_weights[project_url] = 0
-            dev_project_weights[project_url] = 0
-        final_project_weights[project_url] += per_efficient_project
-        dev_project_weights[project_url] = per_efficient_project_dev
-    # Assign weight to preferred projects
-    for project_url, weight in preferred_projects.items():
-        final_project_weights_extract = final_project_weights.get(project_url)
-        preferred_project_weights_extract = preferred_projects.get(project_url)
-        if not final_project_weights_extract:
-            final_project_weights[project_url] = 0
-        intended_weight = (
-            preferred_project_weights_extract / 100
-        ) * total_preferred_weight
-        final_project_weights[project_url] += intended_weight
-    return (
-        combined_stats,
-        final_project_weights,
-        total_preferred_weight,
-        total_mining_weight,
-        dev_project_weights,
-    )
-
-
-async def dev_cleanup(rpc_client: libs.pyboinc.rpc_client = None) -> None:
-    """
-    Cleanup dev installation after use to save disk space, be nice to projects
-    @param rpc_client:
-    @return:
-    """
-    log.debug("in dev_cleanup")
-    attached_projects = []
-    if not rpc_client:
-        try:
-            rpc_client = loop.run_until_complete(
-                setup_connection(BOINC_IP, DEV_BOINC_PASSWORD, port=DEV_RPC_PORT)
-            )  # Setup dev BOINC RPC connection
-        except Exception as e:
-            log.error(
-                "Asked to connect to dev client in dev_cleanup but unable to: {}".format(
-                    e
-                )
-            )
-            return
-    if not rpc_client:
-        log.error("In dev_cleanup not rpc_client x2")
-        return
-    try:
-        loop.run_until_complete(rpc_client.authorize(DEV_BOINC_PASSWORD))
-    except Exception as e:
-        log.error("Error authorizing dev client in dev_cleanup: {}".format(e))
-    try:
-        loop.run_until_complete(kill_all_unstarted_tasks(rpc_client, True, True))
-    except Exception as e:
-        log.error("Error killing all unstarted tasks in dev_cleanup: {}".format(e))
-    try:
-        attached_projects, names_dict = loop.run_until_complete(
-            get_attached_projects(rpc_client)
-        )
-    except Exception as e:
-        log.error("Error getting project list in in dev_cleanup: {}".format(e))
-    if isinstance(attached_projects, list):
-        for project in attached_projects:
-            log.debug("in dev_cleanup resetting project {}".format(project))
-            try:
-                loop.run_until_complete(
-                    run_rpc_command(rpc_client, "project_reset", project)
-                )
-            except Exception as e:
-                log.error("Error resetting project in dev_cleanup: {}".format(project))
-    shutdown_dev_client()
-
-
-async def kill_all_unstarted_tasks(
-    rpc_client: libs.pyboinc.rpc_client, started: bool = False, quiet: bool = False
-) -> None:
-    """
-    Attempts to kill unstarted tasks, returns None if encounters problems
-    @param rpc_client:
-    @param started: kill started tasks as well if True
-    @return:
-    """
-    task_list = None
-    project_status_reply = None
-    try:
-        task_list = loop.run_until_complete(get_task_list(rpc_client))
-    except Exception as e:
-        log.error("Error getting task list from BOINC: {}".format(e))
-    if not isinstance(task_list, list):
-        return
-    try:
-        project_status_reply = await rpc_client.get_project_status()
-    except Exception as e:
-        log.error("Error getting projectstatusreply: {}".format(e))
-        return
-    found_projects = []  # DEBUG ADDED TYPE THIS CORRECTLY
-    for task in task_list:
-        try:
-            # elapsed_time=task['active_task']['current_cpu_time'].seconds
-            name = task["name"]
-            # wu_name=task['wu_name']
-            project_url = task["project_url"].master_url
-            if "active_task" not in task or started:
-                if not quiet:
-                    print("Cancelling unstarted task {}".format(task))
-                log.debug("Cancelling unstarted task {}".format(task))
-                req = ET.Element("abort_result")
-                a = ET.SubElement(req, "project_url")
-                a.text = project_url
-                b = ET.SubElement(req, "name")
-                b.text = name
-                response = await rpc_client._request(req)
-                parsed = parse_generic(response)  # Returns True if successful
-                a = "21"
-            else:
-                # print('Keeping task {}'.format(task))
-                log.debug("Keeping task {}".format(task))
-        except Exception as e:
-            log.error("Error ending task: {}: {}".format(task, e))
-
-
-async def nnt_all_projects(rpc_client: libs.pyboinc.rpc_client) -> None:
-    """
-    NNT all projects, return when done or if encountered errors
-    @param rpc_client:
-    @return:
-    """
-    try:
-        project_status_reply = await rpc_client.get_project_status()
-        found_projects = []
-        for project in project_status_reply:
-            found_projects.append(project.master_url)
-        for project in found_projects:
-            req = ET.Element("project_nomorework")
-            a = ET.SubElement(req, "project_url")
-            a.text = project
-            response = await rpc_client._request(req)
-            parsed = parse_generic(response)  # Returns True if successful
-    except Exception as e:
-        log.error("Error NNTing all projects: {}".format(e))
-
-
-def ignore_message_from_check_log_entries(message):
-    ignore_phrases = [
-        "WORK FETCH RESUMED BY USER",
-        "UPDATE REQUESTED BY USER",
-        "SENDING SCHEDULER REQUEST",
-        "SCHEDULER REQUEST COMPLETED",
-        "PROJECT REQUESTED DELAY",
-        "WORK FETCH SUSPENDED BY USER",
-        "STARTED DOWNLOAD OF",
-        "FINISHED DOWNLOAD OF",
-        "STARTING TASK",
-        "REQUESTING NEW TASKSLAST REQUEST TOO RECENTMASTER FILE DOWNLOAD SUCCEEDED",
-        "NO TASKS SENT",
-        "REQUESTING NEW TASKS FOR",
-        "NO TASKS ARE AVAILABLE FOR",
-        "COMPUTATION FOR TASK",
-        "STARTED UPLOAD OF",
-        "FINISHED UPLOAD OF",
-        "THIS COMPUTER HAS REACHED A LIMIT ON TASKS IN PROGRESS",
-        "UPGRADE TO THE LATEST DRIVER TO PROCESS TASKS USING YOUR COMPUTER'S GPU",
-        "PROJECT HAS NO TASKS AVAILABLE",
-    ]
-    uppered_message = str(message).upper()
-    for phrase in ignore_phrases:
-        if phrase in uppered_message:
-            return True
-    if (
-        "UP TO" in uppered_message
-        and "NEEDS" in uppered_message
-        and "IS AVAILABLE FOR USE" in uppered_message
-        and "BUT ONLY" in uppered_message
-    ):
-        return True
-    if "REPORTING" in uppered_message and "COMPLETED TASKS" in uppered_message:
-        return True
-    return False
-
-
-def cache_full(project_name: str, messages) -> bool:
-    """
-    Returns TRUE if CPU /AND/ GPU cache full, False is either is un-full.
-    Systems w/o GPU will be assumed to have a "full cache" for GPU
-    """
-    cpu_full = False
-    gpu_full = False
-    uppered_project = project_name.upper()
-    for message in messages:
-        if uppered_project not in str(message).upper():
-            continue
-        difference = datetime.datetime.now() - message["time"]
-        if difference.seconds > 60 * 5:  # If message is > 5 min old, skip
-            continue
-        uppered_message_body = message["body"].upper()
-        if (
-            """NOT REQUESTING TASKS: "NO NEW TASKS" REQUESTED VIA MANAGER"""
-            in uppered_message_body
-        ):
-            continue
-        if uppered_project == message["project"].upper():
-            if (
-                "CPU: JOB CACHE FULL" in uppered_message_body
-                or "NOT REQUESTING TASKS: DON'T NEED (JOB CACHE FULL)"
-                in uppered_message_body
-            ):
-                cpu_full = True
-                log.debug("CPU cache appears full {}".format(message["body"]))
-            if "NOT REQUESTING TASKS: DON'T NEED".upper() in uppered_message_body:
-                if "GPU" not in message["body"].upper():
-                    gpu_full = True  # If no GPU, GPU cache is always full
-                if (
-                    "CPU: JOB CACHE FULL" in uppered_message_body
-                    or "NOT REQUESTING TASKS: DON'T NEED (JOB CACHE FULL)"
-                    in uppered_message_body
-                ):
-                    cpu_full = True
-                    log.debug("CPU cache appears full {}".format(message["body"]))
-                else:
-                    if "NOT REQUESTING TASKS: DON'T NEED ()" in uppered_message_body:
-                        pass
-                    else:
-                        log.debug(
-                            "CPU cache appears not full {}".format(message["body"])
-                        )
-                if "GPU: JOB CACHE FULL" in uppered_message_body:
-                    gpu_full = True
-                    log.debug("GPU cache appears full {}".format(message["body"]))
-                elif "GPUS NOT USABLE" in uppered_message_body:
-                    gpu_full = True
-                    log.debug("GPU cache appears full {}".format(message["body"]))
-                else:
-                    if "NOT REQUESTING TASKS: DON'T NEED ()" in uppered_message_body:
-                        pass
-                    else:
-                        if (
-                            not gpu_full
-                        ):  # If GPU is not mentioned in log, this would always
-                            # happen so using this to stop erroneous messages
-                            log.debug(
-                                "GPU cache appears not full {}".format(message["body"])
-                            )
-                continue
-            elif ignore_message_from_check_log_entries(message):
-                pass
-            else:
-                log.warning("Found unknown message1: {}".format(message["body"]))
-    if cpu_full and gpu_full:
-        return True
-    return False
-
-
-async def check_log_entries(
-    rpc_client: libs.pyboinc.rpc_client, project_name: str
-) -> bool:
-    """
-    Return True if project cache full, False if otherwise or unable to determine.
-    project_name: name of project as it will appear in BOINC logs, NOT URL
-    """
-
-    try:
-        # Get message count
-        req = ET.Element("get_message_count")
-        msg_count_response = await rpc_client._request(req)
-        message_count = int(parse_generic(msg_count_response))
-        req = ET.Element("get_messages")
-        a = ET.SubElement(req, "seqno")
-        a.text = str(message_count - 50)  # Get ten most recent messages
-        messages_response = await rpc_client._request(req)
-        messages = parse_generic(messages_response)  # Returns True if successful
-        if cache_full(project_name, messages):
-            return True
-        return False
-    except Exception as e:
-        log.error("Error in check_log_entries: {}".format(e))
-        return False
-
-
-def project_backoff(project_name: str, messages) -> bool:
-    """
-    Returns TRUE if project should be backed off. False otherwise or if unable to determine
-    """
-    # Phrases which indicate project SHOULD be backed off
-    # - removed 'project requested delay' from positive phrases because
-    #   projects always provide this, even if work was provided!
-    positive_phrases = [
-        "PROJECT HAS NO TASKS AVAILABLE",
-        "SCHEDULER REQUEST FAILED",
-        "NO TASKS SENT",
-        "LAST REQUEST TOO RECENT",
-        "AN NVIDIA GPU IS REQUIRED TO RUN TASKS FOR THIS PROJECT",
-    ]
-    # Phrases which indicate project SHOULD NOT be backed off
-    negative_phrases = [
-        "NOT REQUESTING TASKS: DON'T NEED",
-        "STARTED DOWNLOAD",
-        "FINISHED DOWNLOAD OF",
-    ]
-    # Phrases which indicate we can skip this log entry
-    ignore_phrases = [
-        "WORK FETCH RESUMED BY USER",
-        "UPDATE REQUESTED BY USER",
-        "WORK FETCH SUSPENDED BY USER",
-        "STARTING TASK",
-        "REQUESTING NEW TASKS",
-        "SENDING SCHEDULER REQUEST",
-        "SCHEDULER REQUEST COMPLETED",
-        "STARTED UPLOAD",
-        "FINISHED UPLOAD",
-        "MASTER FILE DOWNLOAD SUCCEEDED",
-        "FETCHING SCHEDULER LIST",
-        "UPGRADE TO THE LATEST DRIVER TO PROCESS TASKS USING YOUR COMPUTER'S GPU",
-        "NOT STARTED AND DEADLINE HAS PASSED",
-        "PROJECT REQUESTED DELAY OF",
-    ]
-    uppered_project = project_name.upper()
-    for message in messages:
-        uppered_body = message["body"].upper()
-        uppered_message = str(message).upper()
-        if uppered_project not in uppered_message:
-            continue
-        difference = datetime.datetime.now() - message["time"]
-        if difference.seconds > 60 * 5:  # If message is > 5 min old, skip
-            continue
-        if backoff_ignore_message(message, ignore_phrases):
-            continue
-        for phrase in positive_phrases:
-            if phrase in uppered_body:
-                log.debug("Backing off {} bc {} in logs".format(project_name, phrase))
-                return True
-        for phrase in negative_phrases:
-            if phrase in uppered_body:
-                return False
-        if (
-            "NEEDS" in uppered_body
-            and "BUT ONLY" in uppered_body
-            and "IS AVAILABLE FOR USE" in uppered_body
-        ):
-            log.debug(
-                "Backing off {} bc NEEDS BUT ONLY AVAILABLE FOR USE in logs".format(
-                    project_name
-                ),
-                "DEBUG",
-            )
-            return True
-        log.debug("Found unknown messagex: {}".format(message["body"]))
-    log.warning(
-        "Unable to determine if project {} should be backed off, assuming no".format(
-            project_name
-        )
-    )
-    return False
-
-
-def backoff_ignore_message(message: Dict[str, Any], ignore_phrases: List[str]) -> bool:
-    """
-    Returns True if message can be ignored while checking for backoffs. False otherwise
-    """
-    uppered = str(message["body"]).upper()
-    for phrase in ignore_phrases:
-        if phrase in uppered:
-            return True
-    if "GOT" in uppered and "NEW TASKS" in uppered:
-        return True
-    if "REPORTING" in uppered and "COMPLETED TASKS" in uppered:
-        return True
-    if "COMPUTATION FOR TASK" in uppered and "FINISHED" in uppered:
-        return True
-    return False
-
-
-async def check_log_entries_for_backoff(
-    rpc_client: libs.pyboinc.rpc_client, project_name: str
-) -> bool:
-    """
-    Return True if project should be backed off, False otherwise or if errored
-    project_name: name of project as it will appear in BOINC logs, NOT URL
-    """
-    try:
-        # Get message count
-        req = ET.Element("get_message_count")
-        msg_count_response = await rpc_client._request(req)
-        message_count = int(parse_generic(msg_count_response))
-        req = ET.Element("get_messages")
-        a = ET.SubElement(req, "seqno")
-        a.text = str(message_count - 50)  # Get ten most recent messages
-        messages_response = await rpc_client._request(req)
-        messages = parse_generic(messages_response)  # Returns True if successful
-        if project_name.upper() == "GPUGRID.NET":
-            project_name = (
-                "GPUGRID"  # Fix for log entries which show up under different name
-            )
-        return project_backoff(project_name, messages)
-    except Exception as e:
-        log.error(
-            "Error in check_log_entries_for_backoff: project name {} :{}".format(
-                project_name, e
-            )
-        )
-        return False
-
-
-async def get_all_projects(rpc_client: libs.pyboinc.rpc_client) -> Dict[str, str]:
-    """
-    Get ALL projects the BOINC client knows about, even if unattached. This SHOULD crash the program if it doesn't work
-    so there is no try/except clause
-    """
-    req = ET.Element("get_all_projects_list")
-    messages_response = await rpc_client._request(req)
-    project_status_reply = parse_generic(
-        messages_response
-    )  # Returns True if successful
-    project_names = {}
-    for project in project_status_reply:
-        project_names[project["url"]] = project["name"]
-    project_names["https://gene.disi.unitn.it/test/"] = (
-        "TN-Grid"  # Added bc BOINC client does not list this project for some reason
-    )
-    return project_names
-
-
-async def get_attached_projects(
-    rpc_client: libs.pyboinc.rpc_client,
-) -> Union[Tuple[List[str], Dict[str, str]], Tuple[None, None]]:
-    try:
-        project_status_reply = await rpc_client.get_project_status()
-        found_projects = []
-        project_names = {}
-        for project in project_status_reply:
-            found_projects.append(project.master_url)
-            if isinstance(
-                project.project_name, bool
-            ):  # This happens if project is "attached" but unable to communicate
-                # with the project due to it being down or some other issue
-                project_names[project.master_url] = project.master_url
-            else:
-                project_names[project.master_url] = project.project_name
-        return found_projects, project_names
-    except Exception as e:
-        log.error("Error in get_attached_projects {}".format(e))
-        return None, None
-
-
-async def verify_boinc_connection(rpc_client: libs.pyboinc.rpc_client) -> bool:
-    """
-    Checks if a BOINC client can be connected to and authorized.
-    Returns True if it can, False if it can't.
-    """
-    try:
-        authorize_response = await rpc_client.authorize()
-        req = ET.Element("get_global_prefs_working")
-        response = await rpc_client._request(req)
-        if "unauthorized" in str(response):
-            return False
-        return True
-    except Exception as e:
-        log.error("Error connecting to BOINC in verify_boinc_connection: {}".format(e))
-        return False
-
-
-async def prefs_check(
-    rpc_client: libs.pyboinc.rpc_client,
-    global_prefs: dict = None,
-    disk_usage: dict = None,
-    testing: bool = False,
-) -> bool:
-    """
-    Check that BOINC is configured in the way FTM needs. Currently checks disk usage settings and network settings,
-    warns user and quits if they are not correct. Also returns True is tests pass, false otherwise
-    : global_prefs : for testing only
-    : disk usage : for testing only
-    """
-    # Authorize BOINC client
-    authorize_response = await rpc_client.authorize()
-    # Get prefs
-    return_val = True
-    if not global_prefs:
-        req = ET.Element("get_global_prefs_working")
-        response = await rpc_client._request(req)
-        parsed = parse_generic(response)  # Returns True if successful
-        global_prefs = parsed
-    if not disk_usage:
-        # Get actual disk usage
-        req = ET.Element("get_disk_usage")
-        response = await rpc_client._request(req)
-        usage = parse_generic(response)  # Returns True if successful
-        disk_usage = usage
-    max_gb = int(float(global_prefs.get("disk_max_used_gb", 0)))
-    used_max_gb = int(int(disk_usage["d_allowed"]) / 1024 / 1024 / 1024)
-    if (max_gb < MIN_GB and max_gb != 0) or used_max_gb < (MIN_GB - EXPECTED_GB_USED):
-        if not testing:
-            print_and_log(
-                "BOINC is configured to use less than {}GB, this tool will not run with <{}GB allocated in order to prevent requesting base project files from projects too often.".format(
-                    MIN_GB, MIN_GB
-                ),
-                "ERROR",
-            )
-            print_and_log(
-                'If you have configured BOINC to be able to use >={}GB and still get this message, it is because you are low on disk space and BOINC is responding to settings such as "don\'t use greater than X% of space" or "leave x% free"'.format(
-                    MIN_GB
-                ),
-                "ERROR",
-            )
-            if not SCRIPTED_RUN:
-                input("Press enter to quit")
-            sys.exit(1)
-        else:
-            return_val = False
-    net_start_hour = int(float(global_prefs["net_start_hour"])) + int(
-        float(global_prefs["net_end_hour"])
-    )
-    if net_start_hour != 0:
-        if not testing:
-            print(
-                "You have BOINC configured to only access the network at certain times, this tool requires constant "
-                "internet availability."
-            )
-            log.error(
-                "You have BOINC configured to only access the network at certain times, this tool requires constant "
-                "internet availability."
-            )
-            if not SCRIPTED_RUN:
-                input("Press enter to quit")
-            sys.exit(1)
-        else:
-            return_val = False
-    return return_val
-
-
-def get_highest_priority_project(
-    combined_stats: dict,
-    project_weights: Dict[str, int],
-    min_recheck_time=MIN_RECHECK_TIME,
-    attached_projects: Set[str] = None,
-    quiet: bool = False,
-) -> Tuple[List[str], Dict[str, float]]:
-    """
-    Given STATS, return list of projects sorted by priority. Note that "benchmark" projects are compared to TOTAL time
-    while others are compared to windowed time specific by user
-    """
-    if not attached_projects:
-        attached_projects = []
-    priority_dict = {}
-    # Calculate total time from stats
-    total_xday_time = 0
-    total_time = 0
-    for found_key, projectstats in combined_stats.items():
-        total_xday_time += projectstats["COMPILED_STATS"]["XDAYWALLTIME"]
-        total_time += projectstats["COMPILED_STATS"]["TOTALWALLTIME"]
-    # print('Calculating project weights: total time is {}'.format(total_xday_time))
-    log.debug(
-        "Calculating project weights: total windowed time is {}".format(total_xday_time)
-    )
-    for project, weight in project_weights.items():
-        if not in_list(project, attached_projects):
-            log.debug("skipping project bc not attached {}".format(project))
-            continue
-        combined_stats_extract = combined_stats.get(project)
-        if not combined_stats_extract:
-            if not quiet:
-                print(
-                    "Warning: {} not found in stats, assuming not attached. You can safely ignore this warning w/ a new BOINC install which has not received credit on this project yet ".format(
-                        project
-                    )
-                )
-            log.warning(
-                "Warning: {} not found in stats, assuming not attached You can safely ignore this warning w/ a new BOINC install which has not received credit on this project yet ".format(
-                    project
-                )
-            )
-            existing_time = 0
-        else:
-            if (
-                weight == 1
-            ):  # Benchmarking projects should be over ALL time not just recent time
-                existing_time = combined_stats_extract["COMPILED_STATS"][
-                    "TOTALWALLTIME"
-                ]
-            else:
-                existing_time = combined_stats_extract["COMPILED_STATS"]["XDAYWALLTIME"]
-        if weight == 1:
-            target_time = existing_time - (total_time * (weight / 1000))
-        else:
-            target_time = existing_time - (total_xday_time * (weight / 1000))
-        priority_dict[project] = round(target_time / 60 / 60, 2)
-        log.debug(
-            "Project is {} weight is {} existing time is {} so time delta is {}(s) or {}(h)".format(
-                project,
-                weight,
-                existing_time,
-                target_time,
-                round(target_time / 60 / 60, 4),
-            )
-        )
-    if len(priority_dict) > 0:
-        return sorted(priority_dict, key=priority_dict.get), priority_dict
-    else:
-        print("Error: Unable to find a highest priority project, ? Sleeping for 10 min")
-        log.error(
-            "Unable to find a highest priority project, maybe all have been checked recently? Sleeping for 10 min"
-        )
-        return [], {}
-
-
-def project_name_to_url(
-    searchname: str, project_resolver_dict: Dict[str, str]
-) -> Union[str, None]:
-    for found_project_name, project_url in project_resolver_dict.items():
-        if found_project_name.upper() == searchname.upper():
-            return resolve_url_database(project_url)
-    return None
-
-
-def get_project_mag_ratios_from_response(
-    response: dict,
-    lookback_period: int = 30,
-    project_resolver_dict: Dict[str, str] = None,
-) -> Union[Dict[str, float], None]:
-    loaded_json = response
-    projects = {}
-    return_dict = {}
-    global PROJECT_MAG_RATIOS_CACHE
-    for i in range(0, lookback_period):
-        superblock = loaded_json[i]
-        if i == 0:
-            total_magnitude = superblock["total_magnitude"]
-            total_projects = superblock["total_projects"]
-            mag_per_project = total_magnitude / total_projects
-        for project_name, project_stats in superblock["contract_contents"][
-            "projects"
-        ].items():
-            if project_name not in projects:
-                if i == 0:
-                    projects[project_name] = []
-                else:
-                    continue  # Skip projects which are on greylist
-            projects[project_name].append(project_stats["rac"])
-    for project_name, project_racs in projects.items():
-        average_rac = sum(project_racs) / len(project_racs)
-        project_url = grc_project_name_to_url(project_name, project_resolver_dict)
-        canonical_url = resolve_url_database(project_url)
-        return_dict[canonical_url] = mag_per_project / average_rac
-    PROJECT_MAG_RATIOS_CACHE = return_dict
-    return return_dict
-
-
-def get_project_mag_ratios_from_url(
-    lookback_period: int = 30, project_resolver_dict: Dict[str, str] = None
-) -> Union[Dict[str, float], None]:
-    """
-    :param lookback_period: number of superblocks to look back to determine average
-    :return: Dictionary w/ key as project URL and value as project mag ratio (mag per unit of RAC)
-    """
-    import requests as req
-    import json
-
-    projects = {}
-    return_dict = {}
-    mag_per_project = 0
-    url = "https://www.gridcoinstats.eu/API/simpleQuery.php?q=superblocks"
-    try:
-        resp = req.get(url, proxies=EXTERNAL_REQUEST_PROXIES)
-    except Exception as e:
-        print("Error retrieving project mag ratios from gridcoinstats.eu")
-        if len(PROJECT_MAG_RATIOS_CACHE) > 0:
-            print_and_log(
-                "Error communicating with gridcoinstats for magnitude info, using cached data",
-                "ERROR",
-            )
-            return PROJECT_MAG_RATIOS_CACHE
-        else:
-            print_and_log(
-                "Error communicating with gridcoinstats for magnitude info, no cached data available",
-                "ERROR",
-            )
-        return None
-    try:
-        loaded_json = json.loads(resp.text)
-        if not loaded_json:
-            raise Exception
-        if len(loaded_json) == 0:
-            raise Exception
-        response = get_project_mag_ratios_from_response(
-            loaded_json, lookback_period, project_resolver_dict
-        )
-    except Exception as e:
-        log.error("E in get_project_mag_ratios_from_url:{}".format(e))
-        if len(PROJECT_MAG_RATIOS_CACHE) > 0:
-            print_and_log(
-                "Error communicating with gridcoinstats for magnitude info, using cached data",
-                "ERROR",
-            )
-            return PROJECT_MAG_RATIOS_CACHE
-        return None
-    else:
-        return response
-
-
-def profitability_check(
-    grc_price: float,
-    exchange_fee: float,
-    grc_sell_price: Union[None, float],
-    project: str,
-    min_profit_per_hour: float,
-    combined_stats: dict,
-) -> bool:
-    """
-    Returns True if crunching is profitable right now. False if otherwise or unable to determine.
-    """
-    if not grc_sell_price:
-        grc_sell_price = 0.00
-    if not isinstance(grc_price, float) and not isinstance(grc_price, int):
-        return False
-    combined_stats_extract = combined_stats.get(project)
-    if not combined_stats_extract:
-        log.error(
-            "Error: Unable to calculate profitability for project {} bc we have no stats for it".format(
-                project
-            )
-        )
-        return False
-    if "COMPILED_STATS" not in combined_stats_extract:
-        log.error(
-            "Error: Unable to calculate profitability for project {} bc we have no stats for it (COMPILED_STATS)".format(
-                project
-            )
-        )
-        return False
-    if "AVGMAGPERHOUR" not in combined_stats_extract["COMPILED_STATS"]:
-        log.error(
-            "Error: Unable to calculate profitability for project {} bc we have no stats for it (AVGMAGPERHOUR)".format(
-                project
-            )
-        )
-        return False
-    revenue_per_hour = (
-        combined_stats_extract["COMPILED_STATS"]["AVGMAGPERHOUR"]
-        / 4
-        * max(grc_price, grc_sell_price)
-    )
-    exchange_expenses = revenue_per_hour * exchange_fee
-    expenses_per_hour = exchange_expenses + HOST_COST_PER_HOUR
-    profit = revenue_per_hour - expenses_per_hour
-    if profit > min_profit_per_hour:
-        log.debug(
-            "Determined project {} is profitable. Rev is {} expenses is {} profit is {}".format(
-                project, revenue_per_hour, expenses_per_hour, profit
-            )
-        )
-        return True
-    log.debug(
-        "Determined project {} is NOT profitable. Rev is {} expenses is {} profit is {}".format(
-            project, revenue_per_hour, expenses_per_hour, profit
-        )
-    )
-    return False
-
-
-def date_to_date(date: str) -> datetime.datetime:
-    """
-    Convert date from str to datetime
-    """
-    split = date.split("-")
-    return datetime.datetime(int(split[2]), int(split[0]), int(split[1]))
-
-
-def get_latest_wu_date(combined_stats_extract: List[str]) -> datetime.datetime:
-    """
-    Given list of WUs, return latest date or 1993 if unable to find one
-    @param combined_stats_extract:
-    @return:
-    """
-    latest_date = datetime.datetime(1993, 1, 1)
-    for date in combined_stats_extract:
-        datetimed = date_to_date(date)
-        if datetimed > latest_date:
-            latest_date = datetimed
-    return latest_date
-
-
-def benchmark_check(
-    project_url: str,
-    combined_stats: dict,
-    benchmarking_minimum_wus: float,
-    benchmarking_minimum_time: float,
-    benchmarking_delay_in_days: float,
-    skip_benchmarking: bool,
-) -> bool:
-    """
-    Returns True if we should force crunch this project for benchmarking reasons. False otherwise
-    """
-    if skip_benchmarking:
-        return False
-    combined_stats_extract = combined_stats.get(project_url)
-    if not combined_stats_extract:
-        log.error("Unable to find project in benchmark_check".format(project_url))
-        return True
-    if (
-        combined_stats_extract.get("COMPILED_STATS", {}).get("TOTALWALLTIME", 0)
-        < benchmarking_minimum_time
-    ):
-        log.debug(
-            "Forcing WU fetch on {} due to BENCHMARKING_MINIMUM_TIME".format(
-                project_url
-            )
-        )
-        return True
-    if (
-        combined_stats_extract["COMPILED_STATS"]["TOTALTASKS"]
-        < benchmarking_minimum_wus
-    ):
-        log.debug(
-            "Forcing WU fetch on {} due to benchmarking_minimum_tasks".format(
-                project_url
-            )
-        )
-        return True
-    latest_date = get_latest_wu_date(combined_stats_extract["WU_HISTORY"])
-    delta = datetime.datetime.now() - latest_date
-    if abs(delta.days) > benchmarking_delay_in_days:
-        log.debug(
-            "Forcing WU fetch on {} due to BENCHMARKING_DELAY_IN_DAYS latest WU was {}".format(
-                project_url, latest_date
-            )
-        )
-        return True
-    return False
-
-
-def actual_save_stats(database: Any, path: str = None) -> None:
-    """
-    Save a JSON database file. Normally saves to given path.txt unless the path is "stats"
-    in which case it saves to STAT_FILE
-    """
-    if path:
-        if path == "stats":
-            path = STAT_FILE
-    try:
-        if not path:
-            with open(path + ".txt", "w") as fp:
-                json.dump(database, fp, default=json_default)
-                SAVE_STATS_DB["DATABASE"] = DATABASE
-        else:
-            with open(path, "w") as fp:
-                json.dump(database, fp, default=json_default)
-                SAVE_STATS_DB[path] = database
-    finally:
-        pass
-
-
-def save_stats(database: Any, path: str = None) -> None:
-    """
-    Caching function to save a database. If the database
-    has changed, save it, otherwise don't.
-    """
-    if not path:
-        path = "stats"
-    try:
-        if path in SAVE_STATS_DB:
-            if SAVE_STATS_DB[path] != database:
-                log.debug("Saving DB {}".format(path))
-                actual_save_stats(database, path)
-            else:
-                log.debug("Skipping save of DB {}".format(path))
-        else:
-            log.debug("Saving DB bc not in SAVE_STATS_DB {}".format(path))
-            actual_save_stats(database, path)
-    except Exception as e:
-        log.error("Error saving db {}{}".format(path, e))
-    SAVE_STATS_DB[path] = copy.deepcopy(database)
-
-
-def temp_sleep(boinc_rpc_client=None, dev_loop: bool = False) -> float:
-    global ENABLE_TEMP_CONTROL
-    global LAST_KNOWN_CPU_MODE
-    global CPU_MODE_DICT
-    global LAST_KNOWN_GPU_MODE
-    global GPU_MODE_DICT
-    global TEMP_SLEEP_TIME
-    global DATABASE
-
-    # If we have enabled temperature control, verify that crunching is
-    # allowed at current temp
-    if not ENABLE_TEMP_CONTROL:
-        return 0
-    # Get BOINC's starting CPU and GPU modes
-    existing_mode_info = loop.run_until_complete(
-        run_rpc_command(boinc_rpc_client, "get_cc_status")
-    )
-    existing_cpu_mode: str | None = None
-    existing_gpu_mode: str | None = None
-    if not existing_mode_info:
-        print_and_log(
-            "Error getting cc status to determine temp control", "ERROR"
-        )
-        if LAST_KNOWN_CPU_MODE:
-            existing_cpu_mode = LAST_KNOWN_CPU_MODE
-        if LAST_KNOWN_GPU_MODE:
-            existing_gpu_mode = LAST_KNOWN_GPU_MODE
-    else:
-        existing_cpu_mode = existing_mode_info["task_mode"]
-        if existing_cpu_mode in CPU_MODE_DICT:
-            existing_cpu_mode = CPU_MODE_DICT[existing_cpu_mode]
-            LAST_KNOWN_CPU_MODE = existing_cpu_mode
-        else:
-            print_and_log(
-                "Error: Unknown cpu mode {}".format(existing_cpu_mode), "ERROR"
-            )
-        existing_gpu_mode = str(existing_mode_info["gpu_mode"])
-        if existing_gpu_mode in GPU_MODE_DICT:
-            existing_gpu_mode = GPU_MODE_DICT[existing_gpu_mode]
-            LAST_KNOWN_GPU_MODE = existing_gpu_mode
-        else:
-            print_and_log(
-                "Error: Unknown gpu mode {}".format(existing_gpu_mode), "ERROR"
-            )
-    if not existing_cpu_mode or not existing_gpu_mode:
-        return 0
-    # If temp is too high:
-    if temp_check():
-        return 0
-    elapsed = 0
-    while True:  # Keep sleeping until we pass a temp check
-        log.debug("Sleeping due to temperature")
-        # Put BOINC into sleep mode, automatically reverting if
-        # script closes unexpectedly
-        sleep_interval = str(int(((60 * TEMP_SLEEP_TIME) + 60)))
-        loop.run_until_complete(
-            run_rpc_command(
-                boinc_rpc_client, "set_run_mode", "never", sleep_interval
-            )
-        )
-        loop.run_until_complete(
-            run_rpc_command(
-                boinc_rpc_client, "set_gpu_mode", "never", sleep_interval
-            )
-        )
-        DATABASE["TABLE_SLEEP_REASON"] = "Temperature"
-        update_table(dev_loop=dev_loop)
-        sleep(60 * TEMP_SLEEP_TIME)
-        elapsed += TEMP_SLEEP_TIME
-        if temp_check():
-            # Reset to initial crunching modes now that temp is satisfied
-            loop.run_until_complete(
-                run_rpc_command(
-                    boinc_rpc_client, "set_run_mode", existing_cpu_mode
-                )
-            )
-            loop.run_until_complete(
-                run_rpc_command(
-                    boinc_rpc_client, "set_gpu_mode", existing_gpu_mode
-                )
-            )
-            return elapsed
-
-
-def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
-    """
-    A function to sleep and update the DEVTIMECOUNTER
-    sleep_time: duration in minutes to sleep
-    dev_loop: True if we are in dev loop
-    """
-    log.debug("Sleeping for {}...".format(sleep_time))
-    elapsed = 0
-    next_save = 0
-    next_temp = 0
-    while elapsed < sleep_time:
-        if elapsed >= next_temp:
-            temp_sleep_time = temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
-            elapsed += temp_sleep_time
-            next_temp += temp_sleep_time + CYCLE_TEMP_TIME
-        sleep(60 * CYCLE_CHECK_TIME)
-        if loop.run_until_complete(is_boinc_crunching(boinc_rpc_client)):
-            if dev_loop:
-                DATABASE["DEVTIMETOTAL"] += CYCLE_CHECK_TIME
-            else:
-                DATABASE["FTMTOTAL"] += CYCLE_CHECK_TIME
-        elapsed += CYCLE_CHECK_TIME
-        # Save database every ten minutes
-        if elapsed >= next_save:
-            save_stats(DATABASE)
-            next_save += CYCLE_SAVE_TIME
-    # Save database at end of routine
-    save_stats(DATABASE)
-
-
-def json_default(obj) -> Dict[str, str]:
-    """
-    For serializing datetimes to json
-    """
-    if isinstance(obj, datetime.datetime):
-        return {"_isoformat": obj.isoformat()}
-    raise TypeError("...")
-
-
-def get_avg_mag_hr(combined_stats: dict) -> float:
-    """
-    Get average mag/hr over all projects to date
-    """
-    found_mag = []
-    found_time = []
-    for project_url, stats in combined_stats.items():
-        total_hours = stats["COMPILED_STATS"]["TOTALWALLTIME"]
-        total_mag = (
-            stats["COMPILED_STATS"]["TOTALWALLTIME"]
-            * stats["COMPILED_STATS"]["AVGMAGPERHOUR"]
-        )
-        found_mag.append(total_mag)
-        found_time.append(total_hours)
-    found_sum = sum(found_time)
-    found_mag = sum(found_mag)
-    if found_sum == 0 or found_mag == 0:
-        return 0
-    average = found_mag / found_sum
-    return average
-
-
-def object_hook(obj: Dict[str, str]) -> Union[datetime.datetime, Dict[str, str]]:
-    """
-    For de-serializing datetimes from json
-    """
-    _isoformat = obj.get("_isoformat")
-    if _isoformat is not None:
-        return datetime.datetime.fromisoformat(_isoformat)
-    return obj
-
-
-def setup_dev_boinc() -> str:
-    """
-    Do initial setup of and start dev boinc client. Returns RPC password. Returns 'ERROR' if unable to start BOINC
-    """
-    # Check if dev BOINC directory exists, create if it doesn't
-    dev_path = os.path.abspath("DEVACCOUNT")
-    boinc_executable = "/usr/bin/boinc"
-    if "WINDOWS" in FOUND_PLATFORM.upper():
-        boinc_executable = "C:\\Program Files\\BOINC\\boinc.exe"
-    elif "DARWIN" in FOUND_PLATFORM.upper():
-        boinc_executable = "/Applications/BOINCManager.app/Contents/resources/boinc"
-    if not os.path.exists("DEVACCOUNT"):
-        os.mkdir(dev_path)
-
-    # Update settings to match user settings from main BOINC install
-    global_settings_path = os.path.join(BOINC_DATA_DIR, "global_prefs.xml")
-    override_path = os.path.join(BOINC_DATA_DIR, "global_prefs_override.xml")
-    override_dest_path = os.path.join(
-        os.path.join(os.getcwd(), "DEVACCOUNT"), "global_prefs_override.xml"
-    )
-    shutil.copy(global_settings_path, "DEVACCOUNT")
-    if os.path.exists(override_path):
-        shutil.copy(override_path, "DEVACCOUNT")
-        # Read in the file
-        with open(override_dest_path, "r") as file:
-            filedata = file.read()
-        # Replace the target string
-        if "<disk_max_used_gb>" in filedata:
-            filedata = re.sub(
-                "<disk_max_used_gb>[^<]*</disk_max_used_gb>",
-                "<disk_max_used_gb>5.000000</disk_max_used_gb>",
-                filedata,
-            )
-        else:
-            filedata = filedata.replace(
-                "<global_preferences>",
-                "<global_preferences><disk_max_used_gb>5.000000</disk_max_used_gb>",
-            )
-
-        # Write the file out again
-        with open(override_dest_path, "w") as file:
-            file.write(filedata)
-    else:
-        text_file = open(override_dest_path, "w")
-        n = text_file.write(
-            "<global_preferences><disk_max_used_gb>5.000000</disk_max_used_gb></global_preferences>"
-        )
-        text_file.close()
-    boinc_arguments = [
-        boinc_executable,
-        "--allow_multiple_clients",
-        "--dir",
-        dev_path,
-        "--gui_rpc_port",
-        str(DEV_RPC_PORT),
-    ]
-    try:
-        boinc_result = subprocess.Popen(
-            boinc_arguments, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL
-        )
-    except Exception as e:
-        print("Error launching client for dev crunching {}".format(e))
-        log.error("Error launching client for dev crunching {}".format(e))
-        return "ERROR"
-    sleep(6)
-    auth_location = os.path.join(dev_path, "gui_rpc_auth.cfg")
-    try:
-        if os.path.exists(auth_location):
-            with open(auth_location, "r") as file:
-                data = file.read().rstrip()
-                if data != "":
-                    boinc_password = data
-        else:
-            boinc_password = ""
-    except Exception as e:
-        # This error can generally be disregarded on Linux/OSX
-        if "WINDOWS" in FOUND_PLATFORM.upper():
-            print("Error reading boinc RPC file at {}: {}".format(auth_location, e))
-            log.error("Error reading boinc RPC file at {}: {}".format(auth_location, e))
-        else:
-            log.debug("Error reading boinc RPC file at {}: {}".format(auth_location, e))
-    return boinc_password
-
-
-def project_list_to_project_list(project_list: List[dict]) -> List[str]:
-    """
-    Convert get_project_list into a list of project URLs so we can perform 'in' comparisons
-    """
-    return_list = []
-    for project in project_list:
-        return_list.append(project["master_url"])
-    return return_list
-
-
-def owed_to_dev() -> float:
-    """
-
-    @return: Hours currently owed to dev
-    """
-    total_time_in_hours = (max(DATABASE.get("FTMTOTAL", 0), 1) / 60) + max(
-        DATABASE.get("DEVTIMETOTAL", 0), 1
-    ) / 60
-    dev_time_in_hours = max(DATABASE.get("DEVTIMETOTAL", 0), 1) / 60
-    dev_owed_in_hours = max(0.01, DEV_FEE) * total_time_in_hours
-    discrepancy = dev_owed_in_hours - dev_time_in_hours
-    return discrepancy
-
-
-def should_crunch_for_dev(dev_loop: bool) -> bool:
-    if dev_loop:
-        log.debug("Should not start dev crunching bc already in dev loop")
-        return False
-    if FORCE_DEV_MODE:
-        log.debug("Should start dev crunching bc FORCE_DEV_MODE")
-        return True
-    if CHECK_SIDESTAKE_RESULTS:
-        log.debug("Should skip dev mode bc CHECK_SIDESTAKE_RESULTS")
-        return False
-    discrepancy = owed_to_dev()
-    if discrepancy > 100:
-        log.debug(
-            "Should start dev crunching due to discrepancy: {}".format(discrepancy)
-        )
-        return True
-    log.debug("Should not start dev crunching, current owed is: {}".format(discrepancy))
-    return False
-
-
-def make_discrepancy_timeout(discrepancy: float) -> float:
-    timeout = discrepancy
-    if discrepancy < 0:
-        if FORCE_DEV_MODE:
-            timeout = 60
-        else:
-            timeout = 0
-            log.error(
-                "Discrepancy is < 0 this should not happen: {}".format(discrepancy)
-            )
-    return timeout
 
 
 def update_table(
@@ -3986,6 +1900,9 @@ def update_table(
     )
 
 
+# === Main Loop ===
+
+
 def boinc_loop(
     dev_loop: bool = False, rpc_client=None, client_rpc_client=None, time: int = 0
 ):
@@ -4009,7 +1926,6 @@ def boinc_loop(
     global FINAL_PROJECT_WEIGHTS
     global FINAL_PROJECT_WEIGHTS_DEV
     global total_preferred_weight
-    global total_mining_weight
     global highest_priority_projects
     global priority_results
     global DEV_PROJECT_WEIGHTS
@@ -4096,12 +2012,29 @@ def boinc_loop(
             (abs(mag_fetch_delta.days) * 24 * 60) + (abs(mag_fetch_delta.seconds) / 60)
         ) > 1442:  # Only re-check mag once a day:
             if MAG_RATIO_SOURCE == "WALLET":
-                MAG_RATIOS = get_project_mag_ratios(grc_client, LOOKBACK_PERIOD)
+                MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios(
+                    grc_client,
+                    LOOKBACK_PERIOD,
+                    dump_rac_mag_ratios=(
+                        (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                        if DUMP_RAC_MAG_RATIOS
+                        else None
+                    ),
+                )
                 log.debug(
                     "Fetched MAG RATIOS from wallet, answer is: {}".format(MAG_RATIOS)
                 )
             elif MAG_RATIO_SOURCE == "WEB":
-                MAG_RATIOS = get_project_mag_ratios_from_url(LOOKBACK_PERIOD)
+                MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios_from_url(
+                    project_resolver_dict=get_approved_project_urls_web(),
+                    lookback_period=LOOKBACK_PERIOD,
+                    dump_rac_mag_ratios=(
+                        (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                        if DUMP_RAC_MAG_RATIOS
+                        else None
+                    ),
+                    proxies=EXTERNAL_REQUEST_PROXIES,
+                )
                 log.debug(
                     "Fetched MAG RATIOS from web, answer is: {}".format(MAG_RATIOS)
                 )
@@ -4111,7 +2044,9 @@ def boinc_loop(
         ) > RECALCULATE_STATS_INTERVAL:  # Only re-calculate stats every x minutes
             log.debug("Calculating stats..")
             DATABASE["STATSLASTCALCULATED"] = datetime.datetime.now()
-            COMBINED_STATS = config_files_to_stats(BOINC_DATA_DIR)
+            COMBINED_STATS = config_files_to_stats(
+                BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
+            )
             # Not sure what this line did but commented out, we'll see if anything breaks
             # total_time = combined_stats_to_total_time(COMBINED_STATS)
             if dev_loop:
@@ -4122,12 +2057,12 @@ def boinc_loop(
                     total_mining_weight,
                     DEV_PROJECT_WEIGHTS,
                 ) = generate_stats(
+                    combined_stats=COMBINED_STATS,
                     approved_project_urls=APPROVED_PROJECT_URLS,
                     preferred_projects=PREFERRED_PROJECTS,
                     ignored_projects=IGNORED_PROJECTS,
                     quiet=True,
                     ignore_unattached=True,
-                    attached_list=ATTACHED_PROJECT_SET,
                     mag_ratios=MAG_RATIOS,
                 )
             else:
@@ -4138,12 +2073,12 @@ def boinc_loop(
                     total_mining_weight,
                     DEV_PROJECT_WEIGHTS,
                 ) = generate_stats(
+                    combined_stats=COMBINED_STATS,
                     approved_project_urls=APPROVED_PROJECT_URLS,
                     preferred_projects=PREFERRED_PROJECTS,
                     ignored_projects=IGNORED_PROJECTS,
                     quiet=True,
                     ignore_unattached=True,
-                    attached_list=ATTACHED_PROJECT_SET,
                     mag_ratios=MAG_RATIOS,
                 )
             if DUMP_PROJECT_WEIGHTS:
@@ -4193,19 +2128,21 @@ def boinc_loop(
 
         # If we haven't checked currency exchange rate in a while, do it
         price_check_delta = datetime.datetime.now() - DATABASE.get(
-            f"CURRENCYLASTCHECKED_{CURRENCY_CODE}", datetime.datetime(1993, 3, 3)
+            "CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE),
+            datetime.datetime(1993, 3, 3),
         )
         price_check_calc = (abs(price_check_delta.days) * 24 * 60) + (
             abs(price_check_delta.seconds) / 60
         )
         if price_check_calc > max(PRICE_CHECK_INTERVAL, 60):
             currency_rate = get_currency_rate(CURRENCY_CODE)
-            DATABASE[f"CURRENCYLASTCHECKED_{CURRENCY_CODE}"] = datetime.datetime.now()
+            DATABASE["CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE)] = (
+                datetime.datetime.now()
+            )
             if currency_rate:
-                DATABASE[f"CURRENCY_{CURRENCY_CODE}"] = currency_rate
+                DATABASE["CURRENCY_{}".format(CURRENCY_CODE)] = currency_rate
         else:
-            currency_rate = DATABASE.get(f"CURRENCY_{CURRENCY_CODE}", 1)
-
+            currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
         # Check profitability of all projects, if none profitable
         # (and user doesn't want unprofitable crunching), sleep for 1hr
         if ONLY_BOINC_IF_PROFITABLE and not dev_loop:
@@ -4401,7 +2338,11 @@ def boinc_loop(
                 )
                 continue
             boincified_url = resolve_url_boinc_rpc(
-                highest_priority_project, dev_mode=dev_loop
+                highest_priority_project,
+                dev_mode=dev_loop,
+                known_attached_projects=ATTACHED_PROJECT_SET,
+                known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+                known_boinc_projects=ALL_PROJECT_URLS,
             )
             database_url = resolve_url_database(highest_priority_project)
             benchmark_result = benchmark_check(
@@ -4488,8 +2429,8 @@ def boinc_loop(
             DATABASE["TABLE_STATUS"] = "Waiting for xfers to complete.."
             update_table(dev_loop=dev_loop)
             log.info("Waiting for any xfers to complete...")
-            dl_response = wait_till_no_xfers(
-                rpc_client
+            dl_response = loop.run_until_complete(
+                wait_till_no_xfers(rpc_client)
             )  # Wait until all network activity has concluded
             # If in dev_loop, attach to project if needed
             if dev_loop:
@@ -4511,12 +2452,22 @@ def boinc_loop(
                     converted_project_list = []
 
                 if (
-                    resolve_url_boinc_rpc(highest_priority_project, dev_mode=dev_loop)
+                    resolve_url_boinc_rpc(
+                        highest_priority_project,
+                        dev_mode=dev_loop,
+                        known_attached_projects=ATTACHED_PROJECT_SET,
+                        known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+                        known_boinc_projects=ALL_PROJECT_URLS,
+                    )
                     not in converted_project_list
                 ):
                     # Yoyo will never be in project dict due to not supporting weak auth
                     converted_dev_project_url = resolve_url_boinc_rpc(
-                        highest_priority_project, dev_mode=dev_loop
+                        highest_priority_project,
+                        dev_mode=dev_loop,
+                        known_attached_projects=ATTACHED_PROJECT_SET,
+                        known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+                        known_boinc_projects=ALL_PROJECT_URLS,
                     )
                     if database_url not in DEV_PROJECT_DICT:
                         if "YOYO" not in database_url:
@@ -4547,7 +2498,11 @@ def boinc_loop(
                         )  # We need to re-fetch this as it's now changed
                         ATTACHED_PROJECT_SET.update(temp_project_list)
                         boincified_url = resolve_url_boinc_rpc(
-                            highest_priority_project, dev_mode=dev_loop
+                            highest_priority_project,
+                            dev_mode=dev_loop,
+                            known_attached_projects=ATTACHED_PROJECT_SET,
+                            known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+                            known_boinc_projects=ALL_PROJECT_URLS,
                         )  # This may have changed, so check
                         if (
                             len(ATTACHED_PROJECT_SET) == 0
@@ -4575,10 +2530,10 @@ def boinc_loop(
                     rpc_client, "project_update", "project_url", boincified_url
                 )
             )  # Update project
+            log.debug("Requesting work from {}".format(boincified_url))
             log.debug(
-                "Requesting work from {}".format(boincified_url)
-            )
-            log.debug("Update response is {}".format(update_response))  # added to debug no new tasks bug
+                "Update response is {}".format(update_response)
+            )  # added to debug no new tasks bug
             # Give BOINC time to update w project, I don't know a less hacky way to
             # do this, suggestions are welcome
             sleep(15)
@@ -4625,7 +2580,13 @@ def boinc_loop(
         # This enables BOINC to fetch work if it's needed before our
         # sleep period elapses
         dont_nnt = resolve_url_database(project_loop[0])
-        allow_this_project = resolve_url_boinc_rpc(dont_nnt, dev_mode=dev_loop)
+        allow_this_project = resolve_url_boinc_rpc(
+            dont_nnt,
+            dev_mode=dev_loop,
+            known_attached_projects=ATTACHED_PROJECT_SET,
+            known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+            known_boinc_projects=ALL_PROJECT_URLS,
+        )
         allow_response = loop.run_until_complete(
             run_rpc_command(
                 rpc_client, "project_allowmorework", "project_url", allow_this_project
@@ -4635,72 +2596,27 @@ def boinc_loop(
         custom_sleep(CYCLE_SLEEP_TIME, rpc_client, dev_loop=dev_loop)
 
 
-def print_and_log(msg: str, log_level: str) -> None:
-    """
-    Print a message and add it to the log at LOG_LEVEL. Valid log_levels are DEBUG, INFO, WARNING, ERROR
-    """
-    print(msg)
-    if log_level == "DEBUG":
-        log.debug(msg)
-    elif log_level == "WARNING":
-        log.warning(msg)
-    elif log_level == "INFO":
-        log.info(msg)
-    elif log_level == "ERROR":
-        log.error(msg)
-    else:
-        log.error("Being asked to log at an unknown level: {}".format(log_level))
+def main():
+    global DATABASE
+    global ALL_PROJECT_URLS
+    global ALL_BOINC_PROJECTS
+    global COMBINED_STATS
+    global APPROVED_PROJECT_URLS
+    global ATTACHED_PROJECT_SET
+    global BOINC_PROJECT_NAMES
+    global MAG_RATIOS
+    global MAG_RATIO_SOURCE
+    global CHECK_SIDESTAKE_RESULTS
+    global DEV_PROJECT_WEIGHTS
+    global FINAL_PROJECT_WEIGHTS
+    global total_preferred_weight
+    global priority_results
+    global override_path
+    global override_dest_path
+    global grc_client
 
+    global BOINC_PASSWORD
 
-def create_default_database() -> Dict[str, Any]:
-    DATABASE: Dict[str, Any] = {}
-    DATABASE["DEVTIMECOUNTER"] = 0
-    DATABASE["FTMTOTAL"] = 0
-    DATABASE["DEVTIMETOTAL"] = 0
-    DATABASE["TABLE_STATUS"] = ""
-    DATABASE["TABLE_SLEEP_REASON"] = ""
-    return DATABASE
-
-
-class GracefulInterruptHandler(object):
-
-    def __init__(self, sig=signal.SIGINT, handler=lambda _, __: None):
-        try:
-            self.sig = list(sig)
-        except TypeError:
-            self.sig = [sig]
-        self.handler = handler
-
-    def __enter__(self):
-        self.released = False
-
-        self.original_handlers = {sig: signal.getsignal(sig) for sig in self.sig}
-
-        def handler(signum, frame):
-            self.handler(signum, frame)
-
-        for sig in self.sig:
-            signal.signal(sig, handler)
-
-        return self
-
-    def __exit__(self, type, value, tb):
-        self.release()
-
-    def release(self):
-
-        if self.released:
-            return False
-
-        for sig, original_handler in self.original_handlers.items():
-            signal.signal(sig, original_handler)
-
-        self.released = True
-
-        return True
-
-
-if __name__ == "__main__":
     wallet_running = True  # Switches to false if we have issues connecting
 
     # Verify we are in appropriate python environment
@@ -4741,16 +2657,14 @@ if __name__ == "__main__":
     if os.path.exists(STAT_FILE):
         try:
             with open(STAT_FILE) as json_file:
-                DATABASE: Dict[str, Any] = json.load(json_file, object_hook=object_hook)
+                DATABASE = json.load(json_file, object_hook=object_hook)
         except Exception as e:
             if os.path.exists("{}.backup".format(STAT_FILE)):
                 print("Error opening stats file, trying backup...")
                 log.error("Error opening stats file, trying backup...")
                 try:
                     with open("{}.backup".format(STAT_FILE)) as json_file:
-                        DATABASE: Dict[str, Any] = json.load(
-                            json_file, object_hook=object_hook
-                        )
+                        DATABASE = json.load(json_file, object_hook=object_hook)
                 except:
                     print_and_log(
                         "Error opening stats file, making new one...", "ERROR"
@@ -4987,6 +2901,10 @@ if __name__ == "__main__":
                             "Once it's loaded and --fully-- synced, press enter to continue"
                         )
                         input("")
+        else:
+            rpc_user = None
+            gridcoin_rpc_password = None
+            rpc_port = None
 
         # Get project list from BOINC
         rpc_client = None
@@ -5036,7 +2954,15 @@ if __name__ == "__main__":
             log.debug("Got source_urls from wallet: {}".format(source_urls))
             APPROVED_PROJECT_URLS = resolve_url_list_to_database(source_urls)
             log.debug("Got APPROVED from wallet: {}".format(APPROVED_PROJECT_URLS))
-            MAG_RATIOS = get_project_mag_ratios(grc_client, LOOKBACK_PERIOD)
+            MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios(
+                grc_client,
+                LOOKBACK_PERIOD,
+                dump_rac_mag_ratios=(
+                    (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                    if DUMP_RAC_MAG_RATIOS
+                    else None
+                ),
+            )
             DATABASE["MAGLASTCHECKED"] = datetime.datetime.now()
             log.debug("Got MAG_RATIOS from wallet at startup: {}".format(MAG_RATIOS))
             if not MAG_RATIOS:
@@ -5069,8 +2995,14 @@ if __name__ == "__main__":
                 APPROVED_PROJECT_URLS = resolve_url_list_to_database(
                     list(project_resolver_dict.values())
                 )
-                MAG_RATIOS = get_project_mag_ratios_from_url(
-                    project_resolver_dict=project_resolver_dict
+                MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios_from_url(
+                    project_resolver_dict=project_resolver_dict,
+                    dump_rac_mag_ratios=(
+                        (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                        if DUMP_RAC_MAG_RATIOS
+                        else None
+                    ),
+                    proxies=EXTERNAL_REQUEST_PROXIES,
                 )
                 DATABASE["MAGLASTCHECKED"] = datetime.datetime.now()
                 log.debug("Got MAG_RATIOS from web at startup: {}".format(MAG_RATIOS))
@@ -5124,6 +3056,9 @@ if __name__ == "__main__":
             total_mining_weight,
             DEV_PROJECT_WEIGHTS,
         ) = generate_stats(
+            combined_stats=config_files_to_stats(
+                BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
+            ),
             approved_project_urls=APPROVED_PROJECT_URLS,
             preferred_projects=PREFERRED_PROJECTS,
             ignored_projects=IGNORED_PROJECTS,
@@ -5252,7 +3187,15 @@ if __name__ == "__main__":
                 answer = input("Press enter to quit")
             sys.exit(1)
         try:
-            loop.run_until_complete(prefs_check(rpc_client, testing=TESTING))
+            loop.run_until_complete(
+                prefs_check(
+                    rpc_client,
+                    min_gb=MIN_GB,
+                    expected_gb_used=EXPECTED_GB_USED,
+                    scripted_run=SCRIPTED_RUN,
+                    testing=TESTING,
+                )
+            )
         except Exception as e:
             print_and_log(
                 "Error connecting to BOINC for prefs_check. Is BOINC running?", "ERROR"
@@ -5264,8 +3207,6 @@ if __name__ == "__main__":
         if ABORT_UNSTARTED_TASKS:
             loop.run_until_complete(kill_all_unstarted_tasks(rpc_client))
         priority_results = {}
-        highest_priority_project = ""
-        highest_priority_projects = []
         # Force calculation of stats at first run since they are not cached in DB
         DATABASE["STATSLASTCALCULATED"] = datetime.datetime(1997, 3, 3)
         # While we don't have enough tasks, continue cycling through project list and
@@ -5274,3 +3215,7 @@ if __name__ == "__main__":
         boinc_loop(False, rpc_client)
     # Restore user prefs
     safe_exit(None, None)
+
+
+if __name__ == "__main__":
+    main()
