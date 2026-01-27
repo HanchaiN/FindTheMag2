@@ -1,7 +1,6 @@
 from __future__ import annotations
 import datetime
 import functools
-from time import sleep
 import xml.etree.ElementTree as ET
 
 import xmltodict
@@ -97,7 +96,7 @@ async def run_rpc_command(
 
     while current_retries < max_retries:
         current_retries += 1
-        sleep(retry_wait)
+        await asyncio.sleep(retry_wait)
         full_command = "{} {} {} {} {}".format(
             command, arg1, arg1_val, arg2, arg2_val
         )  # added for debugging purposes

@@ -688,9 +688,9 @@ def get_highest_priority_project(
     if len(priority_dict) > 0:
         return sorted(priority_dict, key=priority_dict.get), priority_dict
     else:
-        print("Error: Unable to find a highest priority project, ? Sleeping for 10 min")
-        log.error(
-            "Unable to find a highest priority project, maybe all have been checked recently? Sleeping for 10 min"
+        print_and_log(
+            "Unable to find a highest priority project, maybe all have been checked recently? Sleeping for 10 min",
+            "ERROR",
         )
         return [], {}
 

@@ -138,8 +138,6 @@ def wait_till_synced(grc_client: GridcoinClientConnection):
     :param grc_client:
     :return:
     """
-    from time import sleep
-
     printed = False
     while True:
         response = grc_client.run_command("getinfo")

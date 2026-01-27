@@ -1042,7 +1042,7 @@ def shutdown_dev_client(quiet: bool = False) -> None:
     """
     # This is needed in case this function is called while main loop is still
     # waiting for an RPC command etc
-    new_loop = asyncio.get_event_loop()
+    new_loop = asyncio.new_event_loop()
     log.info("Attempting to shut down dev client at safe_exit...")
     try:
         dev_rpc_client = new_loop.run_until_complete(
@@ -1060,6 +1060,8 @@ def shutdown_dev_client(quiet: bool = False) -> None:
         )
     except Exception as e:
         log.error("Error shutting down dev client {}".format(e))
+    finally:
+        new_loop.close()
 
 
 async def dev_cleanup(
@@ -1123,6 +1125,10 @@ def safe_exit(_, __) -> None:
         "Program exiting gracefully. Please be patient this may take a few minutes",
         "INFO",
     )
+    try:
+        loop.stop()
+    except Exception as e:
+        log.error("Error stopping main event loop: {}".format(e))
 
     # Backup most recent database save then save database to json file
     log.debug("Saving database")
@@ -1133,7 +1139,7 @@ def safe_exit(_, __) -> None:
         sys.exit()
 
     new_loop = (
-        asyncio.get_event_loop()
+        asyncio.new_event_loop()
     )  # This is needed in case this function is called while main loop is still waiting for an RPC command etc
     # Shutdown developer BOINC client, if running
     if (
@@ -1243,7 +1249,7 @@ def safe_exit(_, __) -> None:
     try:
         loop.close()
     except Exception as e:
-        log.error("Error closing an event loop: {}".format(e))
+        log.error("Error closing main event loop: {}".format(e))
     sys.exit()
 
 
@@ -2124,7 +2130,7 @@ async def boinc_loop(
                 )
             elif MAG_RATIO_SOURCE == "WEB":
                 MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios_from_url(
-                    project_resolver_dict=get_approved_project_urls_web(),
+                    project_resolver_dict=project_resolver_dict,
                     lookback_period=LOOKBACK_PERIOD,
                     dump_rac_mag_ratios=(
                         (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
@@ -2672,6 +2678,7 @@ def main():
     global DEV_PROJECT_WEIGHTS
     global FINAL_PROJECT_WEIGHTS
     global total_preferred_weight
+    global project_resolver_dict
     global priority_results
     global override_path
     global override_dest_path
@@ -3284,7 +3291,13 @@ def main():
         # While we don't have enough tasks, continue cycling through project list and
         # updating. If we have cycled through all projects, get_highest_priority_project
         # will stall to prevent requesting too often
-        loop.run_until_complete(boinc_loop(False, rpc_client))
+        try:
+            loop.run_until_complete(boinc_loop(False, rpc_client))
+        except SystemExit as e:
+            log.info("Exiting FTM as requested")
+            sys.exit(e.code)
+        except Exception as e:
+            print_and_log("Error in main boinc loop: {}".format(e), "ERROR")
     # Restore user prefs
     safe_exit(None, None)
 
