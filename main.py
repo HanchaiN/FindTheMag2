@@ -25,6 +25,9 @@ try:
     import pprint
     from typing import List, Union, Dict, Tuple, Any, Callable, Collection
     import sys, signal
+    import time
+
+    from utils.tune_temp import PIDController, set_temp_control
     from utils.grc_price_utils import get_grc_price_from_sites
     from utils.currency_utils import get_currency_from_sites
     from utils.StatsHelper import (
@@ -116,10 +119,15 @@ ENABLE_TEMP_CONTROL = True  # Enable controlling BOINC based on temp. Default: F
 START_TEMP: int = 65
 STOP_TEMP: int = 75
 TEMP_SLEEP_TIME: float = 10
+ENABLE_TARGET_TEMP_CONTROL = False  # Enable target temp control mode. Default: False
+TARGET_TEMP: int = 70
+MIN_CPU_TIME_PERCENT: float = 20  # Minimum CPU time percent in target temp mode
+MAX_CPU_TIME_PERCENT: float = 100  # Maximum CPU time percent in target temp mode
 TEMP_URL: str | None = None
+TEMP_FILE: str | None = None
 TEMP_COMMAND: str | None = None
+TEMP_FUNCTION: Union[Callable[[], Any], None] = lambda: None
 TEMP_REGEX: str = r"\d*"
-TEMP_FUNCTION: Union[Callable[[], None], None] = lambda: None
 
 DUMP_PROJECT_WEIGHTS: bool = False  # Dump weights assigned to projects
 DUMP_PROJECT_PRIORITY: bool = (
@@ -147,12 +155,13 @@ LOOKBACK_PERIOD = 30
 ABORT_UNSTARTED_TASKS: bool = False
 BOINC_DATA_DIR: Union[str, None] = None
 GRIDCOIN_DATA_DIR: Union[str, None] = None
+BOINCCMD_EXEC: Union[str, None] = None
 STRICT_GRIDCOIN: bool = False
 RECALCULATE_STATS_INTERVAL: int = 60
 PRICE_CHECK_INTERVAL: int = 720
 
 STAT_FILE: str = "stats.json"
-JOURNALD_NAME: str | None = None
+JOURNALD_NAME: Union[str, None] = None
 LOG_LEVEL = "WARNING"
 MAX_LOGFILE_SIZE_IN_MB = 10
 ROLLING_WEIGHT_WINDOW = 60
@@ -167,6 +176,14 @@ BOINC_PORT: int = 31416
 BOINC_USERNAME: Union[str, None] = None
 BOINC_PASSWORD: Union[str, None] = None
 
+# PID controller settings for target temp control mode
+PID_KULTIMATE: Union[float, None] = (
+    0.05  # PID controller ultimate gain in 1/TEMP. Default: 0.05
+)
+PID_STABLE_PERIOD: Union[float, None] = (
+    2  # PID controller stable period in minutes. Default: 2
+)
+
 CYCLE_SLEEP_TIME: float = (
     30  # There's no reason to loop through all projects more than once every 30 minutes
 )
@@ -174,7 +191,7 @@ CYCLE_CHECK_TIME: float = 1  # Check for crunching once every 1 minute
 CYCLE_SAVE_TIME: float = 10  # Save database every ten minutes
 CYCLE_TEMP_TIME: float = 10  # Check for temperature once every ten minutes
 
-EXIT_NNT: bool | None = None
+EXIT_NNT: Union[bool, None] = None
 EXTERNAL_REQUEST_PROXIES: Dict[str, str] = {}
 
 # Constants
@@ -220,6 +237,7 @@ MAG_RATIO_SOURCE: Union[str, None] = None  # Valid values: WALLET|WEB
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
+PID_CTL: Union[PIDController, None] = None
 
 
 def verify_config_import(fname: str) -> bool:
@@ -347,6 +365,19 @@ if GRIDCOIN_DATA_DIR is None:
         )
 assert GRIDCOIN_DATA_DIR is not None, "GRIDCOIN_DATA_DIR is None!"
 GRIDCOIN_DATA_DIR: str = GRIDCOIN_DATA_DIR
+
+if BOINCCMD_EXEC is None:
+    if FOUND_PLATFORM == "Linux":
+        if os.path.isfile("/usr/bin/boinccmd"):
+            BOINCCMD_EXEC = "/usr/bin/boinccmd"
+        else:
+            BOINCCMD_EXEC = "/bin/boinccmd"
+    elif FOUND_PLATFORM == "Darwin":
+        BOINCCMD_EXEC = "/Applications/BOINCManager.app/Contents/resources/boinccmd"
+    else:
+        BOINCCMD_EXEC = "C:\\Program Files\\BOINC\\boinccmd.exe"
+assert BOINCCMD_EXEC is not None, "BOINCCMD_EXEC is None!"
+BOINCCMD_EXEC: str = BOINCCMD_EXEC
 
 # === Fetch update ===
 
@@ -1147,8 +1178,9 @@ def safe_exit(_, __) -> None:
                 "Note that you will need to restart your machine for these changes to take effect"
             )
     else:
+        print_and_log("Removing BOINC override preferences...", "DEBUG")
         try:
-            os.remove(override_dest_path)
+            os.remove(override_path)
         except Exception as e:
             print_and_log(
                 "Error removing overritten BOINC preferences {}".format(e), "WARNING"
@@ -1215,49 +1247,44 @@ def safe_exit(_, __) -> None:
     sys.exit()
 
 
-def temp_check() -> bool:
-    """Checks if temperature is within acceptable limit.
-
-    Confirms if we should keep crunching based on temperature, or not.
-
-    Returns:
-        True if we should keep crunching, False otherwise.
-
-    Raises:
-        Exception: An error occured attempting to read the temperature.
-    """
-    if not ENABLE_TEMP_CONTROL:
-        return True
-    text = ""
-    if TEMP_URL:
-        import requests as req
-
+def temp_get() -> Union[float, None]:
+    text: Union[str, None] = None
+    if text is None and TEMP_FUNCTION:
         try:
+            command_output = TEMP_FUNCTION()
+            if command_output is not None:
+                text = str(command_output)
+        except Exception as e:
+            print_and_log("Error checking temp: {}".format(e), "ERROR")
+    if text is None and TEMP_URL:
+        try:
+            import requests as req
+
             text = req.get(TEMP_URL).text
         except Exception as e:
             print_and_log("Error checking temp: {}".format(e), "ERROR")
-            return True
-    elif TEMP_COMMAND:
+    if text is None and TEMP_COMMAND:
         command = shlex.split(TEMP_COMMAND)
         try:
             text = subprocess.check_output(command).decode()
         except Exception as e:
             print_and_log("Error checking temp: {}".format(e), "ERROR")
-            return True
-    command_output = TEMP_FUNCTION() if TEMP_FUNCTION is not None else None
-    match = None
-    if command_output:
-        text = str(command_output)
-        match = re.search(TEMP_REGEX, text)
-    if text:
-        match = re.search(TEMP_REGEX, text)
-    if match:
+    if text is None and TEMP_FILE:
         try:
-            found_temp = int(match.group(0))
+            with open(TEMP_FILE, "r") as fp:
+                text = fp.read()
+        except Exception as e:
+            print_and_log("Error checking temp: {}".format(e), "ERROR")
+    if text is None:
+        print_and_log("No temp source available!", "ERROR")
+        return None
+    if (match := re.search(TEMP_REGEX, text)) is not None:
+        try:
+            found_temp = float(match.group(0))
             log.debug("Found temp {}".format(found_temp))
             return found_temp
         except Exception as e:
-            print("Error parsing temp {} {}".format(match, e))
+            print_and_log("Error parsing temp {} {}".format(match, e), "ERROR")
             return None
     else:
         print_and_log("No temps found!", "ERROR")
@@ -1277,14 +1304,13 @@ def temp_check(is_crunching: bool = True) -> bool:
     """
     if not ENABLE_TEMP_CONTROL:
         return True
-    temp = temp_get()
-    if temp is not None:
-        if is_crunching and temp > STOP_TEMP:
-            return False
-        if not is_crunching and temp < START_TEMP:
-            return True
-        return is_crunching
-    return True
+    if (temp := temp_get()) is None:
+        return True
+    if is_crunching and temp > STOP_TEMP:
+        return False
+    if not is_crunching and temp < START_TEMP:
+        return True
+    return is_crunching
 
 
 async def get_existing_modes(
@@ -1346,6 +1372,8 @@ async def temp_sleep(
     # If temp is too high:
     if temp_check():
         return 0
+    if PID_CTL is not None:
+        PID_CTL.reset()
     elapsed = 0
     while True:  # Keep sleeping until we pass a temp check
         log.debug("Sleeping due to temperature")
@@ -1382,6 +1410,28 @@ async def temp_sleep(
             return elapsed
 
 
+def temp_target_update() -> None:
+    global ENABLE_TARGET_TEMP_CONTROL
+    global PID_CTL
+    global BOINCCMD_EXEC
+    if not ENABLE_TARGET_TEMP_CONTROL or PID_CTL is None:
+        return
+    if (temp := temp_get()) is None:
+        return
+    PID_CTL.timestamp_update(temp, time.time() / 60)
+    DATABASE["PID_TEMP_STATE"] = PID_CTL.export_state()
+    if BOINCCMD_EXEC is None or not set_temp_control(
+        override_path,
+        BOINCCMD_EXEC,
+        (
+            DATABASE["PID_TEMP_STATE"]["clamped_ctrl"]
+            if "clamped_ctrl" in DATABASE["PID_TEMP_STATE"]
+            else PID_CTL.clamped_ctrl
+        ),
+    ):
+        PID_CTL.reset(2)
+
+
 async def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
     """
     A function to sleep and update the DEVTIMECOUNTER
@@ -1398,6 +1448,7 @@ async def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = Fal
             elapsed += temp_sleep_time
             next_temp += temp_sleep_time + CYCLE_TEMP_TIME
         await asyncio.sleep(60 * CYCLE_CHECK_TIME)
+        temp_target_update()
         if await is_boinc_crunching(boinc_rpc_client):
             if dev_loop:
                 DATABASE["DEVTIMETOTAL"] += CYCLE_CHECK_TIME
@@ -2444,6 +2495,7 @@ async def boinc_loop(
                     )
                 )
                 continue
+            temp_target_update()
             DATABASE["TABLE_STATUS"] = "Waiting for xfers to complete.."
             update_table(dev_loop=dev_loop)
             log.info("Waiting for any xfers to complete...")
@@ -2624,6 +2676,7 @@ def main():
     global override_path
     global override_dest_path
     global grc_client
+    global PID_CTL
 
     global BOINC_PASSWORD
 
@@ -2690,6 +2743,14 @@ def main():
         log.warning("No stats file found, making new one...")
         DATABASE = create_default_database()
         save_stats(DATABASE)
+
+    if ENABLE_TARGET_TEMP_CONTROL:
+        PID_CTL = PIDController(0, TARGET_TEMP)
+        PID_CTL.clamped_low = MIN_CPU_TIME_PERCENT
+        PID_CTL.clamped_high = MAX_CPU_TIME_PERCENT
+        PID_CTL.k_ultimate = PID_KULTIMATE
+        PID_CTL.stable_period = PID_STABLE_PERIOD
+        PID_CTL.import_state(DATABASE.get("PID_TEMP_STATE", {}))
 
     # These vars should reset and/or checked each run
     DATABASE["TABLE_STATUS"] = ""

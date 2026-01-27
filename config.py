@@ -54,8 +54,13 @@ ENABLE_TEMP_CONTROL = False  # Enable controlling BOINC based on temp. Default: 
 START_TEMP = 65  # Start crunching if temp > this number, whole numbers only! Default: 65.
 STOP_TEMP = 75  # Stop crunching is temp > this number, whole numbers only! Default: 75
 TEMP_SLEEP_TIME = 10  # If we should stop crunching due to temp, sleep this many minutes before checking again. Default: 10
+ENABLE_TARGET_TEMP_CONTROL = False  # Enable target temp control mode. Default: False
+TARGET_TEMP = 70
+MIN_CPU_TIME_PERCENT: float = 20  # Minimum CPU time percent in target temp mode
+MAX_CPU_TIME_PERCENT: float = 100  # Maximum CPU time percent in target temp mode
 # Methods of fetching temp data, only use one!
 TEMP_URL = None  # URL to fetch temperature data from, Default: None. # Note this will check temperature quite frequently. This is fine for your smart thermostats on a local IP but not great for publicly-accesible data points. Example: 'https://mytempcheck.com'
+TEMP_FILE = None  # File to read temperature data from. Example: '/sys/class/thermal/thermal_zone0/temp'.
 TEMP_COMMAND = None  # Shell command to run to check temp data. Must use absolute paths ie '/bin/bash /home/user/tempcheck.sh'.
 TEMP_REGEX = r"\d*"  # Regular expression used to scrape temp from command, URL, or other specified source. This just grabs the first sequence of numbers it finds. Default: r'\d*'. Examples: https://www.dataquest.io/blog/regex-cheatsheet/
 
@@ -126,6 +131,10 @@ BOINC_IP = "127.0.0.1"  # defaults to '127.0.0.1' with quotes
 BOINC_PORT = 31416
 BOINC_USERNAME = None  # defaults to None without quotes
 BOINC_PASSWORD = None  # defaults to None, password to the BOINC rpc
+
+# PID controller settings for target temp control mode
+PID_KULTIMATE = 0.05  # PID controller ultimate gain in 1/TEMP. Default: 0.05
+PID_STABLE_PERIOD = 2  # PID controller stable period in minutes. Default: 2
 
 CYCLE_SLEEP_TIME = 30  # There's no reason to loop through all projects more than once every 30 minutes
 CYCLE_CHECK_TIME = 1   # Check for crunching once every 1 minute
