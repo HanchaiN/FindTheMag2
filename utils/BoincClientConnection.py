@@ -1,6 +1,7 @@
 from __future__ import annotations
 import datetime
 import functools
+import sys
 import xml.etree.ElementTree as ET
 
 import xmltodict
@@ -67,7 +68,7 @@ async def run_rpc_command(
     arg1_val: Union[str, None] = None,
     arg2: Union[str, None] = None,
     arg2_val: Union[str, None] = None,
-) -> Union[str, Dict[Any, Any], List[Any], None]:
+) -> Union[Any, None]:
     """Send command to BOINC client via RPC
 
     Runs command on BOINC client via RPC
@@ -174,6 +175,9 @@ async def is_boinc_crunching(rpc_client: RPCClient) -> bool:
     """
     try:
         reply = await run_rpc_command(rpc_client, "get_cc_status")
+        if not reply:
+            log.error("Error getting boinc cc status")
+            return False
         task_suspend_reason = int(reply["task_suspend_reason"])
         if task_suspend_reason != 0:
             # These are documented at
@@ -297,7 +301,7 @@ async def wait_till_no_xfers(rpc_client: RPCClient) -> bool:
     while current_loops < max_loops:
         current_loops += 1
         # Ask BOINC for a list of file transfers
-        allow_response = None
+        allow_response: Union[None, str, list[str]] = None
         cleaned_response = ""
         try:
             allow_response = await run_rpc_command(rpc_client, "get_file_transfers")
@@ -315,6 +319,14 @@ async def wait_till_no_xfers(rpc_client: RPCClient) -> bool:
             cleaned_response = re.sub(r"\s*", "", allow_response)
             if cleaned_response == "":  # There are no transfers, yay!
                 return True
+            else:
+                log.error(
+                    "Error w/ wait_till_no_xfers, allow_response string: {}".format(
+                        allow_response
+                    )
+                )
+                await asyncio.sleep(loop_wait_in_seconds)
+                continue
         if xfers_happening(allow_response):
             log.debug("xfers happening: {}".format(str(allow_response)))
             await asyncio.sleep(loop_wait_in_seconds)
@@ -339,7 +351,7 @@ async def kill_all_unstarted_tasks(
         task_list = await get_task_list(rpc_client)
     except Exception as e:
         log.error("Error getting task list from BOINC: {}".format(e))
-    if not isinstance(task_list, list):
+    if not task_list:
         return
     try:
         project_status_reply = await rpc_client.get_project_status()

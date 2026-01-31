@@ -7,6 +7,7 @@ __version__ = "3.3"
 
 try:
     import copy
+    import dataclasses
     import shlex
     import shutil
     import subprocess
@@ -44,7 +45,6 @@ try:
         check_log_entries_for_backoff,
         get_all_projects,
         get_attached_projects,
-        get_task_list,
         is_boinc_crunching,
         kill_all_unstarted_tasks,
         nnt_all_projects,
@@ -229,15 +229,22 @@ LAST_KNOWN_CPU_MODE = None
 LAST_KNOWN_GPU_MODE = None
 ALL_PROJECT_URLS = set()
 ALL_BOINC_PROJECTS = dict()
-ATTACHED_PROJECT_SET = set()
-ATTACHED_PROJECT_SET_DEV = set()
 COMBINED_STATS = {}
-COMBINED_STATS_DEV = {}
 MAG_RATIO_SOURCE: Union[str, None] = None  # Valid values: WALLET|WEB
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
 PID_CTL: Union[PIDController, None] = None
+
+
+@dataclasses.dataclass
+class State:
+    ATTACHED_PROJECT_SET: set[str] = dataclasses.field(default_factory=set)
+    PROJECT_WEIGHTS: dict[str, int] = dataclasses.field(default_factory=dict)
+
+
+STATE_CLIENT = State()
+STATE_DEV = State()
 
 
 def verify_config_import(fname: str) -> bool:
@@ -620,7 +627,7 @@ def get_approved_project_urls_web(
     cache_available = "GSPROJECTLIST" in DATABASE and "GSRESOLVERDICT" in DATABASE
     # Return cached version if we have it and requested it < 24 hrs ago
     delta = datetime.datetime.now() - DATABASE.get(
-        "LASTGRIDCOINSTATSPROJECTCHECK", datetime.datetime(1993, 3, 3)
+        "LASTGRIDCOINSTATSPROJECTCHECK", datetime.datetime.fromtimestamp(0)
     )
     if abs(delta.days) < 1 and cache_available:
         log.debug("Returning cached version of gridcoinstats data")
@@ -680,14 +687,14 @@ def get_approved_project_urls_web(
 # === Check!!! ===
 
 
-def profitability_check(
+def profitability_estimate(
     grc_price: float,
     exchange_fee: float,
     grc_sell_price: Union[None, float],
     project: str,
     min_profit_per_hour: float,
     combined_stats: dict,
-) -> bool:
+) -> Union[float, None]:
     """
     Returns True if crunching is profitable right now. False if otherwise or unable to determine.
     """
@@ -702,21 +709,21 @@ def profitability_check(
                 project
             )
         )
-        return False
+        return None
     if "COMPILED_STATS" not in combined_stats_extract:
         log.error(
             "Error: Unable to calculate profitability for project {} bc we have no stats for it (COMPILED_STATS)".format(
                 project
             )
         )
-        return False
+        return None
     if "AVGMAGPERHOUR" not in combined_stats_extract["COMPILED_STATS"]:
         log.error(
             "Error: Unable to calculate profitability for project {} bc we have no stats for it (AVGMAGPERHOUR)".format(
                 project
             )
         )
-        return False
+        return None
     revenue_per_hour = (
         combined_stats_extract["COMPILED_STATS"]["AVGMAGPERHOUR"]
         / 4
@@ -725,19 +732,46 @@ def profitability_check(
     exchange_expenses = revenue_per_hour * exchange_fee
     expenses_per_hour = exchange_expenses + HOST_COST_PER_HOUR
     profit = revenue_per_hour - expenses_per_hour
-    if profit > min_profit_per_hour:
         log.debug(
-            "Determined project {} is profitable. Rev is {} expenses is {} profit is {}".format(
+        "Estimating project {} profitability. Rev is {} expenses is {} profit is {}".format(
                 project, revenue_per_hour, expenses_per_hour, profit
             )
         )
-        return True
+    return profit
+
+
+def profitability_check(
+    grc_price: float,
+    exchange_fee: float,
+    grc_sell_price: Union[None, float],
+    project: str,
+    min_profit_per_hour: float,
+    combined_stats: dict,
+) -> bool:
+    """
+    Returns True if crunching is profitable right now. False if otherwise or unable to determine.
+    """
+    profit = profitability_estimate(
+        grc_price,
+        exchange_fee,
+        grc_sell_price,
+        project,
+        min_profit_per_hour,
+        combined_stats,
+    )
+    if profit is None:
+        return False
+    if profit < min_profit_per_hour:
     log.debug(
-        "Determined project {} is NOT profitable. Rev is {} expenses is {} profit is {}".format(
-            project, revenue_per_hour, expenses_per_hour, profit
+            "Determined project {} is NOT profitable. Profit is {}".format(
+                project, profit
         )
     )
     return False
+    log.debug(
+        "Determined project {} is profitable. Profit is {}".format(project, profit)
+    )
+    return True
 
 
 def get_latest_wu_date(combined_stats_extract: List[str]) -> datetime.datetime:
@@ -746,7 +780,7 @@ def get_latest_wu_date(combined_stats_extract: List[str]) -> datetime.datetime:
     @param combined_stats_extract:
     @return:
     """
-    latest_date = datetime.datetime(1993, 1, 1)
+    latest_date = datetime.datetime.fromtimestamp(0)
     for date in combined_stats_extract:
         datetimed = date_to_date(date)
         if datetimed > latest_date:
@@ -817,12 +851,10 @@ def create_default_database() -> Dict[str, Any]:
 
 
 def generate_stats(
-    combined_stats: dict,
     approved_project_urls: Union[List[str], None] = None,
     preferred_projects: Union[Dict[str, float], None] = None,
     ignored_projects: Union[List[str], None] = None,
     known_attached_projects: Union[Collection[str], None] = None,
-    known_attached_projects_dev: Union[Collection[str], None] = None,
     known_boinc_projects: Union[Collection[str], None] = None,
     mag_ratios: Union[Dict[str, float], None] = None,
     quiet: bool = False,
@@ -835,12 +867,13 @@ def generate_stats(
     if ignored_projects is None:
         ignored_projects = IGNORED_PROJECTS
     if known_attached_projects is None:
-        known_attached_projects = ATTACHED_PROJECT_SET
-    if known_attached_projects_dev is None:
-        known_attached_projects_dev = ATTACHED_PROJECT_SET_DEV
+        known_attached_projects = STATE_CLIENT.ATTACHED_PROJECT_SET
     if known_boinc_projects is None:
         known_boinc_projects = ALL_PROJECT_URLS
     weak_stats = []
+    combined_stats = config_files_to_stats(
+        BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
+    )
     if not quiet:
         print_and_log("Calculating project weights...", "INFO")
         print("Curing some cancer along the way...")
@@ -863,10 +896,9 @@ def generate_stats(
             boincified_url = resolve_url_boinc_rpc(
                 project,
                 known_attached_projects=known_attached_projects,
-                known_attached_projects_dev=known_attached_projects_dev,
                 known_boinc_projects=known_boinc_projects,
             )
-            if boincified_url not in ATTACHED_PROJECT_SET:
+            if boincified_url not in known_attached_projects:
                 ignored_projects.append(project)
                 log.warning(
                     "Ignoring whitelisted project {} bc not attached".format(project)
@@ -1143,7 +1175,7 @@ def safe_exit(_, __) -> None:
     )  # This is needed in case this function is called while main loop is still waiting for an RPC command etc
     # Shutdown developer BOINC client, if running
     if (
-        not should_crunch_for_dev(False) and CRUNCHING_FOR_DEV or DEV_EXIT_TEST
+        not should_crunch_for_dev() and CRUNCHING_FOR_DEV or DEV_EXIT_TEST
     ):  # If we are crunching for dev and won't start crunching again on next run
         new_loop.run_until_complete(dev_cleanup(rpc_client=None))
     shutdown_dev_client()
@@ -1152,7 +1184,18 @@ def safe_exit(_, __) -> None:
     if os.path.exists(override_dest_path):
         print_and_log("Restoring original preferences...", "DEBUG")
         try:
+        try:
             shutil.copy(override_dest_path, override_path)
+            except PermissionError as e:
+                log.warning(
+                    "Fallback to content read/write; Permission error restoring original preferences %s",
+                    e,
+                )
+                filedata = ""
+                with open(override_dest_path, "r") as f:
+                    filedata = f.read()
+                with open(override_path, "w") as f:
+                    f.write(filedata)
         except PermissionError as e:
             print_and_log(
                 "Permission error restoring original BOINC preferences {}".format(e),
@@ -1183,6 +1226,8 @@ def safe_exit(_, __) -> None:
             print(
                 "Note that you will need to restart your machine for these changes to take effect"
             )
+        finally:
+            os.remove(override_dest_path)
     else:
         print_and_log("Removing BOINC override preferences...", "DEBUG")
         try:
@@ -1357,7 +1402,9 @@ async def get_existing_modes(
 
 
 async def temp_sleep(
-    boinc_rpc_client: libs.pyboinc.rpc_client.RPCClient, dev_loop: bool = False
+    boinc_rpc_client: libs.pyboinc.rpc_client.RPCClient,
+    max_sleep: float = -1,
+    dev_loop: bool = False,
 ) -> float:
     global ENABLE_TEMP_CONTROL
     global LAST_KNOWN_CPU_MODE
@@ -1398,7 +1445,7 @@ async def temp_sleep(
         update_table(dev_loop=dev_loop)
         await asyncio.sleep(60 * TEMP_SLEEP_TIME)
         elapsed += TEMP_SLEEP_TIME
-        if temp_check(False):
+        if temp_check(False) or elapsed >= max_sleep >= 0:
             # Reset to initial crunching modes now that temp is satisfied
             _ = (
                 await run_rpc_command(
@@ -1438,33 +1485,36 @@ def temp_target_update() -> None:
         PID_CTL.reset(2)
 
 
-async def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = False):
+async def custom_sleep(
+    sleep_time: float,
+    boinc_rpc_client: libs.pyboinc.rpc_client.RPCClient,
+    dev_loop: bool = False,
+):
     """
     A function to sleep and update the DEVTIMECOUNTER
     sleep_time: duration in minutes to sleep
     dev_loop: True if we are in dev loop
     """
-    log.debug("Sleeping for {}...".format(sleep_time))
-    elapsed = 0
+    log.debug("Sleeping for {} minutes...".format(sleep_time))
+    start_time = time.time() / 60
+    last_check = 0
     next_save = 0
     next_temp = 0
-    while elapsed < sleep_time:
-        if elapsed >= next_temp:
-            temp_sleep_time = await temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
-            elapsed += temp_sleep_time
-            next_temp += temp_sleep_time + CYCLE_TEMP_TIME
+    while (elapsed := (time.time() / 60) - start_time) < sleep_time:
         await asyncio.sleep(60 * CYCLE_CHECK_TIME)
-        temp_target_update()
         if await is_boinc_crunching(boinc_rpc_client):
             if dev_loop:
-                DATABASE["DEVTIMETOTAL"] += CYCLE_CHECK_TIME
+                DATABASE["DEVTIMETOTAL"] += elapsed - last_check
             else:
-                DATABASE["FTMTOTAL"] += CYCLE_CHECK_TIME
-        elapsed += CYCLE_CHECK_TIME
-        # Save database every ten minutes
+                DATABASE["FTMTOTAL"] += elapsed - last_check
+            last_check = elapsed
+        if elapsed >= next_temp:
+            next_temp = elapsed + CYCLE_TEMP_TIME
+            await temp_sleep(boinc_rpc_client, dev_loop=dev_loop)
+        await temp_target_update(boinc_rpc_client)
         if elapsed >= next_save:
+            next_save = elapsed + CYCLE_SAVE_TIME
             save_stats(DATABASE)
-            next_save += CYCLE_SAVE_TIME
     # Save database at end of routine
     save_stats(DATABASE)
 
@@ -1472,7 +1522,7 @@ async def custom_sleep(sleep_time: float, boinc_rpc_client, dev_loop: bool = Fal
 # === Dev Crunching ===
 
 
-def setup_dev_boinc() -> str:
+def setup_dev_boinc() -> str | None:
     """
     Do initial setup of and start dev boinc client. Returns RPC password. Returns 'ERROR' if unable to start BOINC
     """
@@ -1535,7 +1585,7 @@ def setup_dev_boinc() -> str:
     except Exception as e:
         print("Error launching client for dev crunching {}".format(e))
         log.error("Error launching client for dev crunching {}".format(e))
-        return "ERROR"
+        return None
     sleep(6)
     auth_location = os.path.join(dev_path, "gui_rpc_auth.cfg")
     boinc_password = ""
@@ -1571,10 +1621,7 @@ def owed_to_dev() -> float:
     return discrepancy
 
 
-def should_crunch_for_dev(dev_loop: bool) -> bool:
-    if dev_loop:
-        log.debug("Should not start dev crunching bc already in dev loop")
-        return False
+def should_crunch_for_dev() -> bool:
     if FORCE_DEV_MODE:
         log.debug("Should start dev crunching bc FORCE_DEV_MODE")
         return True
@@ -1983,7 +2030,7 @@ def update_table(
                 renamed = rename_dict[stat_name]
             rounding = ROUNDING_DICT.get(stat_name, 3)
             table_dict[project_url][renamed] = str(round(float(stat_value), rounding))
-        final_project_weights_extract = FINAL_PROJECT_WEIGHTS.get(project_url)
+        final_project_weights_extract = STATE_CLIENT.PROJECT_WEIGHTS.get(project_url)
         if final_project_weights_extract:
             table_dict[project_url]["WEIGHT"] = str(final_project_weights_extract)
         else:
@@ -1999,8 +2046,6 @@ def update_table(
 
 
 # === Main Loop ===
-
-
 async def boinc_loop(
     dev_loop: bool = False,
     rpc_client: Union[libs.pyboinc.rpc_client.RPCClient, None] = None,
@@ -2024,23 +2069,22 @@ async def boinc_loop(
     existing_gpu_mode = None
     # These variables are referenced outside the loop
     # (or in recursive calls of the loop) so should be made global
+    global DATABASE
+    global STATE_CLIENT
+    global STATE_DEV
     global COMBINED_STATS
-    global COMBINED_STATS_DEV
-    global FINAL_PROJECT_WEIGHTS
-    global FINAL_PROJECT_WEIGHTS_DEV
     global total_preferred_weight
     global highest_priority_projects
     global priority_results
-    global DEV_PROJECT_WEIGHTS
     global DEV_BOINC_PASSWORD
     global DEV_LOOP_RUNNING
     global LAST_KNOWN_CPU_MODE
     global LAST_KNOWN_GPU_MODE
-    global ATTACHED_PROJECT_SET
-    global ATTACHED_PROJECT_SET_DEV
     global BOINC_PROJECT_NAMES
     global MAG_RATIOS
     global CRUNCHING_FOR_DEV
+
+    STATE = STATE_DEV if dev_loop else STATE_CLIENT
     if dev_loop:
         mode = "DEV"
         CRUNCHING_FOR_DEV = True
@@ -2073,10 +2117,9 @@ async def boinc_loop(
     }
 
     while True:
-        discrepancy = owed_to_dev()
         # If we have done sufficient crunching in dev mode, exit dev loop.
         # Closing dev client is done after exiting loop.
-        if discrepancy < 1 and not FORCE_DEV_MODE and dev_loop:
+        if dev_loop and not FORCE_DEV_MODE and owed_to_dev() < 1:
             return None
 
         # Re-authorize in case we have become de-authorized since last run.
@@ -2087,10 +2130,7 @@ async def boinc_loop(
                 temp_project_list, BOINC_PROJECT_NAMES = await get_attached_projects(
                     rpc_client
                 )
-                if mode == "DEV":
-                    ATTACHED_PROJECT_SET_DEV.update(temp_project_list)
-                else:
-                    ATTACHED_PROJECT_SET.update(temp_project_list)
+                STATE.ATTACHED_PROJECT_SET.update(temp_project_list)
                 # Update ALL_BOINC_PROJECTS if we find any new names
                 for url, project_name in BOINC_PROJECT_NAMES.items():
                     if url not in ALL_BOINC_PROJECTS:
@@ -2105,17 +2145,15 @@ async def boinc_loop(
                 break
 
         # If we haven't re-calculated stats or fetched mag recently enough, do it
-        stats_calc_delta = datetime.datetime.now() - DATABASE.get(
-            "STATSLASTCALCULATED", datetime.datetime(1997, 3, 3)
+        now = datetime.datetime.now()
+        mag_last_check: datetime.datetime = DATABASE.get(
+            "MAGLASTCHECKED", datetime.datetime.fromtimestamp(0)
         )
-        mag_fetch_delta = datetime.datetime.now() - DATABASE.get(
-            "MAGLASTCHECKED", datetime.datetime(1997, 3, 3)
-        )
-        if (
-            (abs(mag_fetch_delta.days) * 24 * 60) + (abs(mag_fetch_delta.seconds) / 60)
-        ) > 1442:  # Only re-check mag once a day:
-            if MAG_RATIO_SOURCE == "WALLET":
-                assert grc_client is not None, "GRC client must be provided"
+        mag_fetch_delta = datetime.datetime.now() - mag_last_check
+        # Only re-check mag once a day
+        if abs(mag_fetch_delta.total_seconds() / 60) > 1442:
+            DATABASE["MAGLASTCHECKED"] = now
+            if grc_client is not None:
                 MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios(
                     grc_client,
                     LOOKBACK_PERIOD,
@@ -2128,7 +2166,7 @@ async def boinc_loop(
                 log.debug(
                     "Fetched MAG RATIOS from wallet, answer is: {}".format(MAG_RATIOS)
                 )
-            elif MAG_RATIO_SOURCE == "WEB":
+            else:
                 MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios_from_url(
                     project_resolver_dict=project_resolver_dict,
                     lookback_period=LOOKBACK_PERIOD,
@@ -2142,42 +2180,28 @@ async def boinc_loop(
                 log.debug(
                     "Fetched MAG RATIOS from web, answer is: {}".format(MAG_RATIOS)
                 )
-        if (
-            (abs(stats_calc_delta.days) * 24 * 60)
-            + (abs(stats_calc_delta.seconds) / 60)
-        ) > RECALCULATE_STATS_INTERVAL:  # Only re-calculate stats every x minutes
+
+        now = datetime.datetime.now()
+        stats_last_calc: datetime.datetime = DATABASE.get(
+            "STATSLASTCALCULATED", datetime.datetime.fromtimestamp(0)
+        )
+        stats_calc_delta = now - stats_last_calc
+        # Only re-calculate stats every x minutes
+        if abs(stats_calc_delta.total_seconds() / 60) > RECALCULATE_STATS_INTERVAL:
             log.debug("Calculating stats..")
-            DATABASE["STATSLASTCALCULATED"] = datetime.datetime.now()
-            COMBINED_STATS = config_files_to_stats(
-                BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
-            )
+            DATABASE["STATSLASTCALCULATED"] = now
             # Not sure what this line did but commented out, we'll see if anything breaks
+            # COMBINED_STATS = config_files_to_stats(
+            #     config_dir_abs_path=BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
+            # )
             # total_time = combined_stats_to_total_time(COMBINED_STATS)
-            if dev_loop:
-                (
-                    COMBINED_STATS_DEV,
-                    FINAL_PROJECT_WEIGHTS,
-                    total_preferred_weight,
-                    total_mining_weight,
-                    DEV_PROJECT_WEIGHTS,
-                ) = generate_stats(
-                    combined_stats=COMBINED_STATS,
-                    approved_project_urls=APPROVED_PROJECT_URLS,
-                    preferred_projects=PREFERRED_PROJECTS,
-                    ignored_projects=IGNORED_PROJECTS,
-                    quiet=True,
-                    ignore_unattached=True,
-                    mag_ratios=MAG_RATIOS,
-                )
-            else:
                 (
                     COMBINED_STATS,
-                    FINAL_PROJECT_WEIGHTS,
+                STATE_CLIENT.PROJECT_WEIGHTS,
                     total_preferred_weight,
                     total_mining_weight,
-                    DEV_PROJECT_WEIGHTS,
+                STATE_DEV.PROJECT_WEIGHTS,
                 ) = generate_stats(
-                    combined_stats=COMBINED_STATS,
                     approved_project_urls=APPROVED_PROJECT_URLS,
                     preferred_projects=PREFERRED_PROJECTS,
                     ignored_projects=IGNORED_PROJECTS,
@@ -2186,22 +2210,28 @@ async def boinc_loop(
                     mag_ratios=MAG_RATIOS,
                 )
             if DUMP_PROJECT_WEIGHTS:
-                if not dev_loop:
-                    save_stats(FINAL_PROJECT_WEIGHTS, "FINAL_PROJECT_WEIGHTS")
-                else:
-                    save_stats(FINAL_PROJECT_WEIGHTS, "FINAL_PROJECT_WEIGHTS_DEV")
+                save_stats(
+                    STATE_CLIENT.PROJECT_WEIGHTS,
+                    "FINAL_PROJECT_WEIGHTS",
+                )
+                save_stats(
+                    STATE_DEV.PROJECT_WEIGHTS,
+                    "FINAL_PROJECT_WEIGHTS_DEV",
+                )
             # Get list of projects ordered by priority
             highest_priority_projects, priority_results = get_highest_priority_project(
                 combined_stats=COMBINED_STATS,
-                project_weights=FINAL_PROJECT_WEIGHTS,
-                attached_projects=ATTACHED_PROJECT_SET,
+                project_weights=STATE.PROJECT_WEIGHTS,
+                attached_projects=STATE.ATTACHED_PROJECT_SET,
                 quiet=True,
             )
             if DUMP_PROJECT_PRIORITY:
-                if dev_loop:
-                    save_stats(priority_results, "PRIORITY_RESULTS_DEV")
-                else:
-                    save_stats(priority_results, "PRIORITY_RESULTS")
+                save_stats(
+                    highest_priority_projects,
+                    "HIGHEST_PRIORITY_PROJECTS{}".format(
+                        "" if not dev_loop else "_DEV"
+                    ),
+                )
             log.debug(
                 "Highest priority projects are: " + str(highest_priority_projects)
             )
@@ -2213,44 +2243,46 @@ async def boinc_loop(
                 highest_priority_projects[0], mode
             )
         )
-        await nnt_all_projects(rpc_client)  # NNT all projects
 
         # If we haven't checked GRC prices in a while, do it
-        price_check_delta = datetime.datetime.now() - DATABASE.get(
-            "GRCPRICELASTCHECKED", datetime.datetime(1993, 3, 3)
+        now = datetime.datetime.now()
+        price_last_check: datetime.datetime = DATABASE.get(
+            "GRCPRICELASTCHECKED", datetime.datetime.fromtimestamp(0)
         )
-        price_check_calc = (abs(price_check_delta.days) * 24 * 60) + (
-            abs(price_check_delta.seconds) / 60
-        )
-        if price_check_calc > max(PRICE_CHECK_INTERVAL, 60):
-            grc_price = get_grc_price()
-            DATABASE["GRCPRICELASTCHECKED"] = datetime.datetime.now()
+        price_check_delta = now - price_last_check
+        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
+            grc_price: float | None = get_grc_price()
+            DATABASE["GRCPRICELASTCHECKED"] = now
             if grc_price is not None:
                 DATABASE["GRCPRICE"] = grc_price
         grc_price = DATABASE.get("GRCPRICE", 0)
+        assert grc_price is not None, "GRC price should not be None here"
 
         # If we haven't checked currency exchange rate in a while, do it
-        price_check_delta = datetime.datetime.now() - DATABASE.get(
+        now = datetime.datetime.now()
+        price_last_check: datetime.datetime = DATABASE.get(
             "CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE),
-            datetime.datetime(1993, 3, 3),
+            datetime.datetime.fromtimestamp(0),
         )
-        price_check_calc = (abs(price_check_delta.days) * 24 * 60) + (
-            abs(price_check_delta.seconds) / 60
-        )
-        if price_check_calc > max(PRICE_CHECK_INTERVAL, 60):
-            currency_rate = get_currency_rate(CURRENCY_CODE)
-            DATABASE["CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE)] = (
-                datetime.datetime.now()
-            )
+        price_check_delta = now - price_last_check
+        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
+            currency_rate: float | None = get_currency_rate(CURRENCY_CODE)
+            DATABASE["CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE)] = now
             if currency_rate is not None:
                 DATABASE["CURRENCY_{}".format(CURRENCY_CODE)] = currency_rate
         currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
+        assert currency_rate is not None, "Currency rate should not be None here"
+
         # Check profitability of all projects, if none profitable
         # (and user doesn't want unprofitable crunching), sleep for 1hr
-        if ONLY_BOINC_IF_PROFITABLE and not dev_loop:
-            profitability_list = []
+        if not dev_loop and ONLY_BOINC_IF_PROFITABLE:
+            profit_total = 0.0
+            benchmark_result = False
+
             for project in highest_priority_projects:
-                profitability_result = profitability_check(
+                profit_total += (
+                    (
+                        profitability_estimate(
                     grc_price=grc_price * currency_rate,
                     exchange_fee=EXCHANGE_FEE,
                     grc_sell_price=GRC_SELL_PRICE,
@@ -2258,49 +2290,53 @@ async def boinc_loop(
                     min_profit_per_hour=MIN_PROFIT_PER_HOUR,
                     combined_stats=COMBINED_STATS,
                 )
-                benchmarking_result = benchmark_check(
+                        or 0
+                    )
+                    * STATE.PROJECT_WEIGHTS.get(project, 0)
+                    / 1000.0
+                )
+                benchmark_result = benchmark_result or benchmark_check(
                     project_url=project,
-                    combined_stats=COMBINED_STATS,
+                    combined_stats=STATE.PROJECT_WEIGHTS,
                     benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
                     benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
                     benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
                     skip_benchmarking=SKIP_BENCHMARKING,
                 )
-                profitability_list.append(profitability_result)
-                profitability_list.append(benchmarking_result)
-            if True not in profitability_list:
+            if not benchmark_result and profit_total < MIN_PROFIT_PER_HOUR:
                 log.info(
                     "No projects currently profitable and no benchmarking required, sleeping for 1 hour and killing all non-started tasks"
                 )
+                if ABORT_UNSTARTED_TASKS:
                 try:
-                    tasks_list = await get_task_list(rpc_client)
                     await kill_all_unstarted_tasks(rpc_client=rpc_client)
                 except Exception as e:
                     pass
                 await nnt_all_projects(rpc_client)
                 DATABASE["TABLE_SLEEP_REASON"] = (
-                    "No profitable projects and no benchmarking required, sleeping 1 hr, killing all non-started tasks"
+                    "No profitable projects and no benchmarking required, sleeping 1 hr."
                 )
                 update_table(dev_loop=dev_loop)
                 await asyncio.sleep(60 * 60)
                 continue
 
+        await nnt_all_projects(rpc_client)  # NNT all projects
         await temp_sleep(rpc_client, dev_loop=dev_loop)
+        await temp_target_update(rpc_client)
 
         # If we are due to run under dev account, do it
-        if should_crunch_for_dev(dev_loop):
+        if not dev_loop and should_crunch_for_dev():
             CRUNCHING_FOR_DEV = True
             dev_boinc_password = setup_dev_boinc()  # Setup and start dev boinc
             DEV_BOINC_PASSWORD = dev_boinc_password
             dev_rpc_client = None
-            if dev_boinc_password == "ERROR":
+            if dev_boinc_password is None:
                 log.error("Error setting up crunching to developer account")
             else:
                 # Setup dev RPC connection, it may take a few tries while we
                 # wait for it to come online
                 tries = 1
                 tries_max = 5
-                dev_rpc_client = None
                 while tries <= tries_max:
                     try:
                         dev_rpc_client = await setup_connection(
@@ -2319,9 +2355,9 @@ async def boinc_loop(
                         break
                     await asyncio.sleep(30)
                     tries += 1
-                    if tries > tries_max:
+                else:
                         log.error("Giving up on connecting to BOINC dev client")
-            if dev_rpc_client:
+            if dev_rpc_client is not None:
                 # Set main BOINC to suspend until we're done crunching in dev mode.
                 # It will automatically re-enable itself in 100x the time if nothing
                 # is done.
@@ -2334,8 +2370,7 @@ async def boinc_loop(
                 if (
                     existing_cpu_mode and existing_gpu_mode
                 ):  # We can't do this if we don't know what mode to revert back to
-                    discrepancy = owed_to_dev()
-                    timeout = make_discrepancy_timeout(discrepancy)
+                    timeout = make_discrepancy_timeout(owed_to_dev())
                     _ = (
                         await run_rpc_command(
                             dev_rpc_client,
@@ -2364,11 +2399,13 @@ async def boinc_loop(
                         client_rpc_client=rpc_client,
                         time=DATABASE["DEVTIMECOUNTER"],
                     )  # Run the BOINC loop :)
+                else:
+                    log.error("Unable to start dev mode due to unknown last mode")
                     await dev_cleanup(dev_rpc_client)
                     log.debug("dev_cleanup_called it appears boinc_loop ended")
                     update_table(dev_loop=dev_loop)
                     DEV_LOOP_RUNNING = False
-                    # Re-enable client BOINC
+                if existing_cpu_mode and existing_gpu_mode:  # Re-enable client BOINC
                     _ = (
                         await run_rpc_command(
                             rpc_client, "set_run_mode", existing_cpu_mode
@@ -2377,16 +2414,15 @@ async def boinc_loop(
                             rpc_client, "set_gpu_mode", existing_gpu_mode
                         ),
                     )
-                else:
-                    log.error("Unable to start dev mode due to unknown last mode")
 
         # Loop through each project in order of priority and request new tasks if
         # not backed off stopping looping if cache becomes full
         dont_nnt = None
-        if dev_loop:
-            project_loop = DEV_PROJECT_WEIGHTS
-            # Re-up suspend on main client
-            timeout = make_discrepancy_timeout(discrepancy)
+        project_loop = (
+            highest_priority_projects # if not dev_loop else STATE_DEV.PROJECT_WEIGHTS.keys()
+        )
+        if dev_loop:  # Re-up suspend on main client
+            timeout = make_discrepancy_timeout(owed_to_dev())
             _ = (
                 await run_rpc_command(
                     client_rpc_client,
@@ -2401,9 +2437,6 @@ async def boinc_loop(
                     str(timeout * 60 * 60 * 10),
                 ),
             )
-
-        else:
-            project_loop = highest_priority_projects
         for highest_priority_project in project_loop:
             if highest_priority_project in IGNORED_PROJECTS:
                 log.debug(
@@ -2414,20 +2447,10 @@ async def boinc_loop(
                 continue
             boincified_url = resolve_url_boinc_rpc(
                 highest_priority_project,
-                dev_mode=dev_loop,
-                known_attached_projects=ATTACHED_PROJECT_SET,
-                known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+                known_attached_projects=STATE.ATTACHED_PROJECT_SET,
                 known_boinc_projects=ALL_PROJECT_URLS,
             )
             database_url = resolve_url_database(highest_priority_project)
-            benchmark_result = benchmark_check(
-                project_url=database_url,
-                combined_stats=COMBINED_STATS,
-                benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
-                benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
-                benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
-                skip_benchmarking=SKIP_BENCHMARKING,
-            )
             profitability_result = profitability_check(
                 grc_price=grc_price * currency_rate,
                 exchange_fee=EXCHANGE_FEE,
@@ -2436,55 +2459,44 @@ async def boinc_loop(
                 min_profit_per_hour=MIN_PROFIT_PER_HOUR,
                 combined_stats=COMBINED_STATS,
             )
-            if (
-                ONLY_BOINC_IF_PROFITABLE
-                and not benchmark_result
-                and not profitability_result
-                and not dev_loop
-            ):
-                DATABASE["TABLE_STATUS"] = "No fetch for {} bc not profitable".format(
-                    database_url
-                )
-                update_table(dev_loop=dev_loop)
-                log.info(
-                    "Skipping work fetch for {} bc not profitable and ONLY_BOINC_IF_PROFITABLE is set to true".format(
-                        database_url
-                    )
-                )
-                continue
+            benchmark_result = benchmark_check(
+                project_url=database_url,
+                combined_stats=COMBINED_STATS,
+                benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
+                benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
+                benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
+                skip_benchmarking=SKIP_BENCHMARKING,
+            )
             # If user has set to only mine highest mag project if profitable and
             # it's not profitable or in benchmarking mode, skip
             if (
-                ONLY_MINE_IF_PROFITABLE
+                (ONLY_MINE_IF_PROFITABLE or ONLY_BOINC_IF_PROFITABLE)
                 and not benchmark_result
                 and not profitability_result
                 and not dev_loop
                 and database_url not in PREFERRED_PROJECTS
             ):
                 DATABASE["TABLE_STATUS"] = (
-                    "Skipping work fetch for {} bc not profitable and ONLY_MINE_IF_PROFITABLE set to true".format(
-                        database_url
-                    )
+                    "Skipping work fetch for {} bc not profitable".format(database_url)
                 )
                 update_table(dev_loop=dev_loop)
                 log.info(
-                    "Skipping work fetch for {} bc not profitable and ONLY_MINE_IF_PROFITABLE set to true".format(
-                        database_url
-                    )
+                    "Skipping work fetch for {} bc not profitable".format(database_url)
                 )
                 continue
             if database_url not in DATABASE[mode]:
                 DATABASE[mode][database_url] = {}
             # Skip checking project if we have a backoff counter going and it
             # hasn't been long enough
+            now = datetime.datetime.now()
             last_project_check: datetime.datetime = DATABASE[mode][database_url].get(
-                "LAST_CHECKED", datetime.datetime(1997, 6, 21, 18, 25, 30)
+                "LAST_CHECKED", datetime.datetime.fromtimestamp(0)
             )
-            backoff_period = DATABASE[mode].get(database_url, {}).get("BACKOFF", 0)
-            time_since_last_project_check = datetime.datetime.now() - last_project_check
+            time_since_last_project_check = now - last_project_check
             minutes_since_last_project_check = (
                 abs(time_since_last_project_check.total_seconds()) / 60
             )
+            backoff_period = DATABASE[mode].get(database_url, {}).get("BACKOFF", 0)
             if minutes_since_last_project_check < backoff_period:
                 DATABASE["TABLE_STATUS"] = (
                     "Skipping {} due to backoff period...".format(
@@ -2501,7 +2513,7 @@ async def boinc_loop(
                     )
                 )
                 continue
-            temp_target_update()
+
             DATABASE["TABLE_STATUS"] = "Waiting for xfers to complete.."
             update_table(dev_loop=dev_loop)
             log.info("Waiting for any xfers to complete...")
@@ -2510,6 +2522,7 @@ async def boinc_loop(
             )  # Wait until all network activity has concluded
             if not dl_response:
                 log.info("Timeout waiting for xfers to complete, proceeding anyway")
+
             # If in dev_loop, attach to project if needed
             if dev_loop:
                 get_project_list = await run_rpc_command(
@@ -2529,24 +2542,8 @@ async def boinc_loop(
                     )
                     converted_project_list = []
 
-                if (
-                    resolve_url_boinc_rpc(
-                        highest_priority_project,
-                        dev_mode=dev_loop,
-                        known_attached_projects=ATTACHED_PROJECT_SET,
-                        known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
-                        known_boinc_projects=ALL_PROJECT_URLS,
-                    )
-                    not in converted_project_list
-                ):
+                if database_url not in converted_project_list:
                     # Yoyo will never be in project dict due to not supporting weak auth
-                    converted_dev_project_url = resolve_url_boinc_rpc(
-                        highest_priority_project,
-                        dev_mode=dev_loop,
-                        known_attached_projects=ATTACHED_PROJECT_SET,
-                        known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
-                        known_boinc_projects=ALL_PROJECT_URLS,
-                    )
                     if database_url not in DEV_PROJECT_DICT:
                         if "YOYO" not in database_url:
                             log.error(
@@ -2572,22 +2569,21 @@ async def boinc_loop(
                         ) = await get_attached_projects(
                             rpc_client
                         )  # We need to re-fetch this as it's now changed
-                        ATTACHED_PROJECT_SET.update(temp_project_list)
+                        STATE.ATTACHED_PROJECT_SET.update(temp_project_list)
                         boincified_url = resolve_url_boinc_rpc(
                             highest_priority_project,
-                            dev_mode=dev_loop,
-                            known_attached_projects=ATTACHED_PROJECT_SET,
-                            known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+                            known_attached_projects=STATE.ATTACHED_PROJECT_SET,
                             known_boinc_projects=ALL_PROJECT_URLS,
                         )  # This may have changed, so check
                         if (
-                            len(ATTACHED_PROJECT_SET) == 0
+                            boincified_url not in STATE.ATTACHED_PROJECT_SET
                         ):  # Using this as a proxy for "failed attach"
                             log.error(
                                 "Appears to fail to attach to {}".format(boincified_url)
                             )
                             continue
                         print("")
+
             project_name = ALL_BOINC_PROJECTS[boincified_url]
             DATABASE["TABLE_STATUS"] = "Allowing new tasks & updating {}".format(
                 project_name
@@ -2608,8 +2604,12 @@ async def boinc_loop(
             )  # added to debug no new tasks bug
             # Give BOINC time to update w project, I don't know a less hacky way to
             # do this, suggestions are welcome
-            await asyncio.sleep(15)
-            DATABASE[mode][database_url]["LAST_CHECKED"] = datetime.datetime.now()
+            await asyncio.gather(
+                asyncio.sleep(15),
+                temp_target_update(rpc_client),
+            )
+            now = datetime.datetime.now()
+            DATABASE[mode][database_url]["LAST_CHECKED"] = now
             # Check if project should be backed off. If so, back it off.
             # This is an exponentially increasing backoff with a maximum time of 1 day
             # Projects are backed off if they request it, if they are
@@ -2652,9 +2652,7 @@ async def boinc_loop(
         dont_nnt = resolve_url_database(project_loop[0])
         allow_this_project = resolve_url_boinc_rpc(
             dont_nnt,
-            dev_mode=dev_loop,
-            known_attached_projects=ATTACHED_PROJECT_SET,
-            known_attached_projects_dev=ATTACHED_PROJECT_SET_DEV,
+            known_attached_projects=STATE.ATTACHED_PROJECT_SET,
             known_boinc_projects=ALL_PROJECT_URLS,
         )
         allow_response = await run_rpc_command(
@@ -2666,17 +2664,15 @@ async def boinc_loop(
 
 def main():
     global DATABASE
+    global STATE_CLIENT
+    global STATE_DEV
     global ALL_PROJECT_URLS
     global ALL_BOINC_PROJECTS
     global COMBINED_STATS
     global APPROVED_PROJECT_URLS
-    global ATTACHED_PROJECT_SET
     global BOINC_PROJECT_NAMES
     global MAG_RATIOS
-    global MAG_RATIO_SOURCE
     global CHECK_SIDESTAKE_RESULTS
-    global DEV_PROJECT_WEIGHTS
-    global FINAL_PROJECT_WEIGHTS
     global total_preferred_weight
     global project_resolver_dict
     global priority_results
@@ -2714,6 +2710,7 @@ def main():
     del python_minor
     del python_major
     log.debug("Python version {}".format(platform.python_version()))
+
     # These must be declared early in case the user ctrl+Cs the script.
     # This way, safe_exit can use these paths
     override_path = os.path.join(BOINC_DATA_DIR, "global_prefs_override.xml")
@@ -2836,33 +2833,20 @@ def main():
         auth_location = os.path.join(BOINC_DATA_DIR, "gui_rpc_auth.cfg")
         if not BOINC_PASSWORD:
             try:
-                with open(auth_location, "r") as file:
-                    data = file.read().rstrip()
+                with open(auth_location, "r") as f:
+                    data = f.read().rstrip()
                     if data != "":
                         BOINC_PASSWORD = data
             except Exception as e:
                 # This error can generally be disregarded on Linux/OSX
-                if "WINDOWS" in FOUND_PLATFORM.upper():
-                    print(
-                        "Error reading boinc RPC file at {}: {}".format(
-                            auth_location, e
-                        )
-                    )
-                    log.error(
-                        "Error reading boinc RPC file at {}: {}".format(
-                            auth_location, e
-                        )
-                    )
-                else:
-                    log.debug(
-                        "Error reading boinc RPC file at {}: {}".format(
-                            auth_location, e
-                        )
+                print_and_log(
+                    "Error reading boinc RPC file at {}: {}".format(auth_location, e),
+                    "ERROR" if "WINDOWS" in FOUND_PLATFORM.upper() else "DEBUG",
                     )
 
         # Check that project weights make sense
         total_found_values = 0
-        for url, found_value in PREFERRED_PROJECTS.items():
+        for found_value in PREFERRED_PROJECTS.values():
             total_found_values += found_value
         if total_found_values != 100 and len(PREFERRED_PROJECTS) > 0:
             print_and_log(
@@ -2892,17 +2876,12 @@ def main():
             try:
                 gridcoin_conf = get_gridcoin_config_parameters(GRIDCOIN_DATA_DIR)
             except Exception as e:
-                print(
+                print_and_log(
                     "Error parsing gridcoin config file in directory: "
                     + GRIDCOIN_DATA_DIR
                     + " Error: "
-                    + str(e)
-                )
-                log.error(
-                    "Error parsing gridcoin config file in directory: "
-                    + GRIDCOIN_DATA_DIR
-                    + " Error: "
-                    + str(e)
+                    + str(e),
+                    "ERROR",
                 )
                 wallet_running = False
                 rpc_user = None
@@ -2914,13 +2893,10 @@ def main():
                 gridcoin_rpc_password = gridcoin_conf.get("rpcpassword")
                 rpc_port = gridcoin_conf.get("rpcport")
             if not rpc_user or not gridcoin_rpc_password or not rpc_port:
-                print(
+                print_and_log(
                     "Error: Gridcoin wallet is not configured to accept RPC commands based on config file from "
-                    + str(GRIDCOIN_DATA_DIR)
-                )
-                log.error(
-                    "Error: Gridcoin wallet is not configured to accept RPC commands based on config file from "
-                    + str(GRIDCOIN_DATA_DIR)
+                    + str(GRIDCOIN_DATA_DIR),
+                    "ERROR",
                 )
                 print(
                     "RPC commands enable us to talk to the Gridcoin client and get information about project magnitude ratios"
@@ -3010,7 +2986,7 @@ def main():
                 "Error connecting to BOINC client, unable to get project list.", "ERROR"
             )
             sys.exit(1)
-        ATTACHED_PROJECT_SET.update(temp_project_set)
+        STATE_CLIENT.ATTACHED_PROJECT_SET.update(temp_project_set)
         combine_dicts(BOINC_PROJECT_NAMES, temp_project_names)
         try:
             ALL_BOINC_PROJECTS = loop.run_until_complete(get_all_projects(rpc_client))
@@ -3023,7 +2999,9 @@ def main():
         developer_address = "RzUgcntbFm8PeSJpauk6a44qbtu92dpw3K"
         try:
             grc_client = GridcoinClientConnection(
-                rpc_user=rpc_user, rpc_port=rpc_port, rpc_password=gridcoin_rpc_password
+                rpc_port=rpc_port,
+                rpc_user=rpc_user,
+                rpc_password=gridcoin_rpc_password,
             )
             # Test if the client is connectable
             source_urls = grc_client.get_approved_project_urls()
@@ -3046,7 +3024,7 @@ def main():
             if not MAG_RATIOS:
                 raise ConnectionError("Issues connecting with Gridcoin wallet")
         except Exception as e:
-            MAG_RATIO_SOURCE = "WEB"
+            grc_client = None
             print_and_log(
                 "Unable to connect to Gridcoin wallet. Assuming it doesn't exist. Error: ",
                 "ERROR",
@@ -3095,7 +3073,6 @@ def main():
                 sys.exit(1)
         else:
             assert gridcoin_conf is not None
-            MAG_RATIO_SOURCE = "WALLET"
             # Check sidestakes, prompt user to enable them if they don't exist
             CHECK_SIDESTAKE_RESULTS = check_sidestake(
                 gridcoin_conf, foundation_address, 1
@@ -3130,14 +3107,11 @@ def main():
 
         (
             COMBINED_STATS,
-            FINAL_PROJECT_WEIGHTS,
+            STATE_CLIENT.PROJECT_WEIGHTS,
             total_preferred_weight,
             total_mining_weight,
-            DEV_PROJECT_WEIGHTS,
+            STATE_DEV.PROJECT_WEIGHTS,
         ) = generate_stats(
-            combined_stats=config_files_to_stats(
-                BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
-            ),
             approved_project_urls=APPROVED_PROJECT_URLS,
             preferred_projects=PREFERRED_PROJECTS,
             ignored_projects=IGNORED_PROJECTS,
@@ -3186,7 +3160,7 @@ def main():
             "INFO",
         )
         print_and_log("FINAL SUGGESTED PROJECT WEIGHTS", "INFO")
-        for project, weight in FINAL_PROJECT_WEIGHTS.items():
+        for project, weight in STATE_CLIENT.PROJECT_WEIGHTS.items():
             print_and_log(project.lower() + ": " + str(weight), "INFO")
         if CHECK_SIDESTAKE_RESULTS:
             print(

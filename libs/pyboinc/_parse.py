@@ -1,3 +1,4 @@
+from typing import Literal
 from ._tag import Tag
 from xml.etree import ElementTree as ET
 from datetime import datetime, timedelta
@@ -158,8 +159,8 @@ for parser_func, tags in [
 ]:
     TAG_PARSER.update((tag, parser_func) for tag in tags)
 
-
-def parse_generic(e: ET.Element):
+type ParseGenericReturn = list[ParseGenericReturn] | dict[str, ParseGenericReturn] | str | Literal[True]
+def parse_generic(e: ET.Element) -> ParseGenericReturn:
     if len(e) > 0:
         if e.tag in LIST_TAG:
             return [parse_generic(cc) for cc in e]

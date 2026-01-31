@@ -539,8 +539,6 @@ def get_most_mag_efficient_projects(
 def _resolve_url_boinc_rpc(
     original_uppered: str,
     known_attached_projects: EquivalentWrapper[Collection[str]],
-    known_attached_projects_dev: EquivalentWrapper[Collection[str]],
-    dev_mode: bool = False,
 ) -> str | None:
     """
     Given a URL, return the version BOINC is attached to for RPC purposes. Variables aside from dev_mode default to globals if
@@ -557,19 +555,12 @@ def _resolve_url_boinc_rpc(
     uppered = uppered.replace("HTTP://", "")
     if uppered.startswith("WWW."):
         uppered = uppered.replace("WWW.", "")
-    if dev_mode:
-        for known_attached_project in known_attached_projects_dev.obj:
-            if uppered in known_attached_project.upper():
-                return known_attached_project
-    else:
-        for known_attached_project in known_attached_projects.obj:
-            if uppered in known_attached_project.upper():
-                return known_attached_project
-        log.debug(
-            "{} not in in known attached projects in resolve_url_boinc_rpc".format(
-                uppered
-            )
-        )
+    for known_attached_project in known_attached_projects.obj:
+        if uppered in known_attached_project.upper():
+            return known_attached_project
+    log.debug(
+        "{} not in in known attached projects in resolve_url_boinc_rpc".format(uppered)
+    )
 
     return None
 
@@ -577,9 +568,7 @@ def _resolve_url_boinc_rpc(
 def resolve_url_boinc_rpc(
     url: str,
     known_attached_projects: Collection[str],
-    known_attached_projects_dev: Collection[str],
     known_boinc_projects: Collection[str],
-    dev_mode: bool = False,
 ) -> str:
     """
     Given a URL, return the version BOINC is attached to for RPC purposes. Variables aside from dev_mode default to globals if
@@ -601,8 +590,6 @@ def resolve_url_boinc_rpc(
     known_attached_project = _resolve_url_boinc_rpc(
         original_uppered,
         EquivalentWrapper(known_attached_projects),
-        EquivalentWrapper(known_attached_projects_dev),
-        dev_mode=dev_mode,
     )
     if known_attached_project is not None:
         return known_attached_project
@@ -633,7 +620,7 @@ def get_highest_priority_project(
     """
     if not attached_projects:
         attached_projects = []
-    priority_dict = {}
+    priority_dict: dict[str, float] = {}
     # Calculate total time from stats
     total_xday_time = 0
     total_time = 0
@@ -686,7 +673,10 @@ def get_highest_priority_project(
             )
         )
     if len(priority_dict) > 0:
-        return sorted(priority_dict, key=priority_dict.get), priority_dict
+        return (
+            sorted(priority_dict.keys(), key=lambda x: priority_dict.get(x, 0)),
+            priority_dict,
+        )
     else:
         print_and_log(
             "Unable to find a highest priority project, maybe all have been checked recently? Sleeping for 10 min",

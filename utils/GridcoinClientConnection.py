@@ -43,8 +43,8 @@ class GridcoinClientConnection:
     def __init__(
         self,
         config_file: str | None = None,
-        ip_address: str = "127.0.0.1",
-        rpc_port: str = "9876",
+        ip_address: str | None = None,
+        rpc_port: str | None = None,
         rpc_user: str | None = None,
         rpc_password: str | None = None,
         retries: int = 3,
@@ -62,15 +62,17 @@ class GridcoinClientConnection:
             retry_delay: int = 1,
         """
         self.configfile = config_file  # Absolute path to the client config file
-        self.ipaddress = ip_address
-        self.rpc_port = rpc_port
+        self.ipaddress = ip_address or "127.0.0.1"
+        self.rpc_port = rpc_port or "9876"
         self.rpcuser = rpc_user
         self.rpcpassword = rpc_password
         self.retries = retries
         self.retry_delay = retry_delay
 
     def run_command(
-        self, command: str, arguments: Union[List[Union[str, bool]], None] = None
+        self,
+        command: str,
+        arguments: Union[List[Union[str, bool, int, float]], None] = None,
     ) -> Union[dict, None]:
         """Send command to local Gridcoin wallet
 
@@ -301,7 +303,9 @@ class ProjectMagRatio:
             if not response:
                 raise ConnectionError("Issues w superblocks command")
             if not grc_projects:
-                grc_projects = grc_client.run_command("listprojects")["result"]
+                grc_projects = (grc_client.run_command("listprojects") or {}).get(
+                    "result"
+                )
             if not grc_projects:
                 raise ConnectionError("Issues w listproject command")
             return_dict = cls.get_project_mag_ratios_from_response(
