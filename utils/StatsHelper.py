@@ -5,7 +5,7 @@ import os
 import functools
 import logging
 import re
-from typing import Collection, Dict, List, Tuple, Union
+from typing import Collection, Dict, List, Literal, Tuple, Union
 from utils.utils import EquivalentWrapper, combine_dicts, in_list, resolve_url_database
 import datetime
 import xmltodict
@@ -60,7 +60,7 @@ def stat_file_to_list(
     Turns a BOINC job log into list of dictionaries we can use, each dictionary
     is a task.
     Dictionaries have the following keys:
-        STARTTIME,ESTTIME,CPUTIME,ESTIMATEDFLOPS,TASKNAME,WALLTIME,EXITCODE
+        STARTTIME,ESTTIME,CPUTIME,ESTIMATEDFLOPS,TASKNAME,WALLTIME,CPUTIME,EXITCODE
 
     Note that ESTIMATEDFLOPS comes from the project and EXITCODE will always be zero.
     All values and keys in dicts are strings.
@@ -218,11 +218,13 @@ def calculate_credit_averages(
         total_credit = 0
         total_cpu_time = 0
         total_wall_time = 0
+        x_day_cpu_time = 0
         x_day_wall_time = 0
         for date, credit_history in parent_dict["CREDIT_HISTORY"].items():
             total_credit += credit_history["CREDITAWARDED"]
         for date, wu_history in parent_dict["WU_HISTORY"].items():
             total_wus += wu_history["TOTALWUS"]
+            total_cpu_time += wu_history["total_cpu_time"]
             total_wall_time += wu_history["total_wall_time"]
             split_date = date.split("-")
             datetimed_date = datetime.datetime(
@@ -233,21 +235,24 @@ def calculate_credit_averages(
             time_ago = datetime.datetime.now() - datetimed_date
             days_ago = time_ago.days
             if days_ago <= rolling_weight_window:
+                x_day_cpu_time += wu_history["total_cpu_time"]
                 x_day_wall_time += wu_history["total_wall_time"]
-            total_cpu_time += wu_history["total_cpu_time"]
         if total_wus == 0:
             avg_wall_time = 0
             avg_cpu_time = 0
             avg_credit_per_task = 0
-            credits_per_hour = 0
+            credits_per_wall_hour = 0
+            credits_per_cpu_hour = 0
         else:
-            total_cpu_time = total_cpu_time / 60 / 60  # convert to hours
             total_wall_time = total_wall_time / 60 / 60  # convert to hours
+            total_cpu_time = total_cpu_time / 60 / 60  # convert to hours
             x_day_wall_time = x_day_wall_time / 60 / 60  # convert to hours
+            x_day_cpu_time = x_day_cpu_time / 60 / 60  # convert to hours
             avg_wall_time = total_wall_time / total_wus
             avg_cpu_time = total_cpu_time / total_wus
             avg_credit_per_task = total_credit / total_wus
-            credits_per_hour = total_credit / (total_wall_time)
+            credits_per_wall_hour = total_credit / total_wall_time
+            credits_per_cpu_hour = total_credit / total_cpu_time
         return_stats[project_url]["TOTALCREDIT"] = total_credit
         return_stats[project_url]["AVGWALLTIME"] = avg_wall_time
         return_stats[project_url]["AVGCPUTIME"] = avg_cpu_time
@@ -255,8 +260,10 @@ def calculate_credit_averages(
         return_stats[project_url]["TOTALTASKS"] = total_wus
         return_stats[project_url]["TOTALWALLTIME"] = total_wall_time
         return_stats[project_url]["TOTALCPUTIME"] = total_cpu_time
-        return_stats[project_url]["AVGCREDITPERHOUR"] = credits_per_hour
+        return_stats[project_url]["AVGCREDITPERWALLHOUR"] = credits_per_wall_hour
+        return_stats[project_url]["AVGCREDITPERCPUHOUR"] = credits_per_cpu_hour
         return_stats[project_url]["XDAYWALLTIME"] = x_day_wall_time
+        return_stats[project_url]["XDAYCPUTIME"] = x_day_cpu_time
         log.debug(
             "For project {} this host has crunched {} WUs for {} total credit with an average of {} credits per WU. {} hours were spent on these WUs for {} credit/hr".format(
                 project_url.lower(),
@@ -264,7 +271,7 @@ def calculate_credit_averages(
                 round(total_credit, 2),
                 round(avg_credit_per_task, 2),
                 round((total_wall_time), 2),
-                round(credits_per_hour, 2),
+                round(credits_per_wall_hour, 2),
             )
         )
     return return_stats
@@ -403,14 +410,17 @@ def add_mag_to_combined_stats(
             if project_url not in approved_projects:
                 if project_url not in preferred_projects:
                     unapproved_list.append(project_url)
-            project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"] = 0
+            project_stats["COMPILED_STATS"]["AVGMAGPERWALLHOUR"] = 0
+            project_stats["COMPILED_STATS"]["AVGMAGPERCPUHOUR"] = 0
             project_stats["COMPILED_STATS"]["MAGPERCREDIT"] = 0
             continue
-        avg_credit_per_hour = 0
-        if "AVGCREDITPERHOUR" in project_stats["COMPILED_STATS"]:
-            avg_credit_per_hour = project_stats["COMPILED_STATS"]["AVGCREDITPERHOUR"]
-        project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"] = (
-            avg_credit_per_hour * found_mag_ratio
+        project_stats["COMPILED_STATS"]["AVGMAGPERWALLHOUR"] = (
+            found_mag_ratio
+            * project_stats["COMPILED_STATS"].get("AVGCREDITPERWALLHOUR", 0)
+        )
+        project_stats["COMPILED_STATS"]["AVGMAGPERCPUHOUR"] = (
+            found_mag_ratio
+            * project_stats["COMPILED_STATS"].get("AVGCREDITPERCPUHOUR", 0)
         )
         project_stats["COMPILED_STATS"]["MAGPERCREDIT"] = found_mag_ratio
     return combined_stats, unapproved_list
@@ -452,6 +462,7 @@ def get_most_mag_efficient_projects(
     ignored_projects: List[str],
     percentdiff: int = 10,
     quiet: bool = False,
+    time_mode: Literal["WALL", "CPU"] = "WALL",
 ) -> List[str]:
     """Determines most magnitude efficient project(s).
 
@@ -477,9 +488,9 @@ def get_most_mag_efficient_projects(
     for project_url, project_stats in combinedstats.items():
         if project_url in ignored_projects:
             continue
-        current_mag_per_hour = project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"]
+        current_mag_per_hour = project_stats["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
         highest_mag_per_hour = combinedstats[highest_project]["COMPILED_STATS"][
-            "AVGMAGPERHOUR"
+            "AVGMAGPER{}HOUR".format(time_mode)
         ]
         if current_mag_per_hour > highest_mag_per_hour and is_project_eligible(
             project_url, project_stats, ignored_projects
@@ -490,22 +501,22 @@ def get_most_mag_efficient_projects(
             print(
                 "\n\nHighest mag/hr project --with at least 10 completed WUs-- is {} w/ {}/hr of credit.".format(
                     highest_project.lower(),
-                    combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPERHOUR"],
+                    combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)],
                 )
             )
         log.info(
             "Highest mag/hr project //with at least 10 completed WUs// is {} w/ {}/hr of credit.".format(
                 highest_project,
-                combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPERHOUR"],
+                combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)],
             )
         )
     return_list.append(highest_project)
 
     # then compare other projects to it to see if any are within percentdiff of it
-    highest_avg_mag = combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPERHOUR"]
+    highest_avg_mag = combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
     minimum_for_inclusion = highest_avg_mag - (highest_avg_mag * (percentdiff / 100))
     for project_url, project_stats in combinedstats.items():
-        current_avg_mag = project_stats["COMPILED_STATS"]["AVGMAGPERHOUR"]
+        current_avg_mag = project_stats["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
         if project_url == highest_project:
             continue
         if project_url in ignored_projects:
@@ -613,6 +624,7 @@ def get_highest_priority_project(
     project_weights: Dict[str, int],
     attached_projects: Union[Collection[str], None] = None,
     quiet: bool = False,
+    time_mode: Literal["WALL", "CPU"] = "WALL",
 ) -> Tuple[List[str], Dict[str, float]]:
     """
     Given STATS, return list of projects sorted by priority. Note that "benchmark" projects are compared to TOTAL time
@@ -625,8 +637,8 @@ def get_highest_priority_project(
     total_xday_time = 0
     total_time = 0
     for found_key, projectstats in combined_stats.items():
-        total_xday_time += projectstats["COMPILED_STATS"]["XDAYWALLTIME"]
-        total_time += projectstats["COMPILED_STATS"]["TOTALWALLTIME"]
+        total_xday_time += projectstats["COMPILED_STATS"]["XDAY{}TIME".format(time_mode)]
+        total_time += projectstats["COMPILED_STATS"]["TOTAL{}TIME".format(time_mode)]
     # print('Calculating project weights: total time is {}'.format(total_xday_time))
     log.debug(
         "Calculating project weights: total windowed time is {}".format(total_xday_time)
@@ -654,10 +666,10 @@ def get_highest_priority_project(
                 weight == 1
             ):  # Benchmarking projects should be over ALL time not just recent time
                 existing_time = combined_stats_extract["COMPILED_STATS"][
-                    "TOTALWALLTIME"
+                    "TOTAL{}TIME".format(time_mode)
                 ]
             else:
-                existing_time = combined_stats_extract["COMPILED_STATS"]["XDAYWALLTIME"]
+                existing_time = combined_stats_extract["COMPILED_STATS"]["XDAY{}TIME".format(time_mode)]
         if weight == 1:
             target_time = existing_time - (total_time * (weight / 1000))
         else:
@@ -685,17 +697,17 @@ def get_highest_priority_project(
         return [], {}
 
 
-def get_avg_mag_hr(combined_stats: dict) -> float:
+def get_avg_mag_hr(combined_stats: dict, time_mode: Literal["WALL", "CPU"] = "WALL") -> float:
     """
     Get average mag/hr over all projects to date
     """
     found_mag = []
     found_time = []
     for project_url, stats in combined_stats.items():
-        total_hours = stats["COMPILED_STATS"]["TOTALWALLTIME"]
+        total_hours = stats["COMPILED_STATS"]["TOTAL{}TIME".format(time_mode)]
         total_mag = (
-            stats["COMPILED_STATS"]["TOTALWALLTIME"]
-            * stats["COMPILED_STATS"]["AVGMAGPERHOUR"]
+            stats["COMPILED_STATS"]["TOTAL{}TIME".format(time_mode)]
+            * stats["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
         )
         found_mag.append(total_mag)
         found_time.append(total_hours)

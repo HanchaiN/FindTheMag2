@@ -78,6 +78,7 @@ def TEMP_FUNCTION():
 ##########################################################################################################################################
 # If these options are enabled, they will periodically dump the contents of some internal variables to text files in the FTM directory
 # Set to True to enable
+DUMP_PROJECT_PROFIT: bool = False  # Dump estimated profit per hour for each project
 DUMP_PROJECT_WEIGHTS: bool = False  # Dump weights assigned to projects
 DUMP_PROJECT_PRIORITY: bool = False  # Dump weights adjusted after considering current and past crunching time
 DUMP_RAC_MAG_RATIOS: bool = False  # Dump the RAC:MAG ratios from each Gridcoin project

@@ -24,7 +24,7 @@ try:
     from pathlib import Path
     import datetime
     import pprint
-    from typing import List, Union, Dict, Tuple, Any, Callable, Collection
+    from typing import List, Union, Dict, Tuple, Any, Callable, Collection, Literal
     import sys, signal
     import time
 
@@ -131,12 +131,14 @@ TEMP_COMMAND: str | None = None
 TEMP_FUNCTION: Union[Callable[[], Any], None] = lambda: None
 TEMP_REGEX: str = r"\d*"
 
+DUMP_PROJECT_PROFIT: bool = False  # Dump estimated profit per hour for each project
 DUMP_PROJECT_WEIGHTS: bool = False  # Dump weights assigned to projects
 DUMP_PROJECT_PRIORITY: bool = (
     False  # Dump weights adjusted after considering current and past crunching time
 )
 DUMP_RAC_MAG_RATIOS: bool = False  # Dump the RAC:MAG ratios from each Gridcoin project
 DUMP_DATABASE: bool = False  # Dump the DATABASE
+DUMP_DIR: str = "dump/"
 # how many decimal places to round each stat to which is printed in the output table
 ROUNDING_DICT: Dict[str, int] = {
     "MAGPERCREDIT": 5,
@@ -225,6 +227,7 @@ ALL_PROJECT_URLS = set()
 ALL_BOINC_PROJECTS = dict()
 COMBINED_STATS = {}
 MAG_RATIO_SOURCE: Union[str, None] = None  # Valid values: WALLET|WEB
+TIME_MODE: Literal["WALL", "CPU"] = "WALL"  # Valid values: WALL|CPU
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
@@ -673,11 +676,10 @@ def profitability_estimate(
     exchange_fee: float,
     grc_sell_price: Union[None, float],
     project: str,
-    min_profit_per_hour: float,
     combined_stats: dict,
 ) -> Union[float, None]:
     """
-    Returns True if crunching is profitable right now. False if otherwise or unable to determine.
+    Returns Average profit per hour crunching given project and GRC price info.
     """
     if not grc_sell_price:
         grc_sell_price = 0.00
@@ -698,7 +700,10 @@ def profitability_estimate(
             )
         )
         return None
-    if "AVGMAGPERHOUR" not in combined_stats_extract["COMPILED_STATS"]:
+    if (
+        "AVGMAGPER{}HOUR".format(TIME_MODE)
+        not in combined_stats_extract["COMPILED_STATS"]
+    ):
         log.error(
             "Error: Unable to calculate profitability for project {} bc we have no stats for it (AVGMAGPERHOUR)".format(
                 project
@@ -706,7 +711,7 @@ def profitability_estimate(
         )
         return None
     revenue_per_hour = (
-        combined_stats_extract["COMPILED_STATS"]["AVGMAGPERHOUR"]
+        combined_stats_extract["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(TIME_MODE)]
         / 4
         * max(grc_price, grc_sell_price)
     )
@@ -737,7 +742,6 @@ def profitability_check(
         exchange_fee,
         grc_sell_price,
         project,
-        min_profit_per_hour,
         combined_stats,
     )
     if profit is None:
@@ -787,7 +791,9 @@ def benchmark_check(
         log.error("Unable to find project in benchmark_check".format(project_url))
         return True
     if (
-        combined_stats_extract.get("COMPILED_STATS", {}).get("TOTALWALLTIME", 0)
+        combined_stats_extract.get("COMPILED_STATS", {}).get(
+            "TOTAL{}TIME".format(TIME_MODE), 0
+        )
         < benchmarking_minimum_time
     ):
         log.debug(
@@ -903,7 +909,7 @@ def generate_stats(
             + str(unapproved_projects)
         )
     most_efficient_projects = get_most_mag_efficient_projects(
-        combined_stats, ignored_projects, quiet=quiet
+        combined_stats, ignored_projects, quiet=quiet, time_mode=TIME_MODE
     )
     if len(most_efficient_projects) == 0:
         print_and_log(
@@ -1009,6 +1015,7 @@ def actual_save_stats(db_dump: str, path: str) -> None:
         if path == "stats":
             path = STAT_FILE
     try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as fp:
             fp.write(db_dump)
     finally:
@@ -1947,13 +1954,13 @@ def print_table(
         )
     # print improved stats
     addl = ""
-    curr_avg_mag = get_avg_mag_hr(COMBINED_STATS)
+    curr_avg_mag = get_avg_mag_hr(COMBINED_STATS, time_mode="WALL")
     if curr_avg_mag > DATABASE["STARTMAGHR"] and DATABASE["STARTMAGHR"] > 0:
         increase = (curr_avg_mag - DATABASE["STARTMAGHR"]) / DATABASE["STARTMAGHR"]
         addl = " That's an increase of {:.2f}%!".format(increase * 100)
     print(
         "When you started using this tool, your average mag/hr was: {:.4f} now it is {:.4f}".format(
-            DATABASE["STARTMAGHR"], get_avg_mag_hr(COMBINED_STATS)
+            DATABASE["STARTMAGHR"], curr_avg_mag
         )
         + addl
     )
@@ -2009,8 +2016,8 @@ def update_table(
         "TOTALTASKS": "TASKS",
         "TOTALTIME(HRS)": "TIME",
         "TOTALCPUTIME(HRS)": "CPUTIME",
-        "AVGCREDITPERHOUR": "CREDIT/HR",
-        "AVGMAGPERHOUR": "MAG/HR",
+        "AVGCREDITPERWALLHOUR": "CREDIT/HR",
+        "AVGMAGPERWALLHOUR": "MAG/HR",
         "XDAYWALLTIME": "RWTIME",
         "AVGWALLTIME": "ATIME",
         "AVGCREDITPERTASK": "ACPT",
@@ -2104,7 +2111,7 @@ async def boinc_loop(
     if mode not in DATABASE:
         DATABASE[mode] = {}
     if DUMP_DATABASE:
-        save_stats(DATABASE, "DATABASE_DUMP")
+        save_stats(DATABASE, "{}/DATABASE_DUMP".format(DUMP_DIR))
 
     # Note yoyo@home does not support weak auth so it can't be added here
     # URLs must be in canonicalized database format
@@ -2168,7 +2175,7 @@ async def boinc_loop(
                     grc_client,
                     LOOKBACK_PERIOD,
                     dump_rac_mag_ratios=(
-                        (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                        (lambda d: save_stats(d, "{}/RAC_MAG_RATIOS".format(DUMP_DIR)))
                         if DUMP_RAC_MAG_RATIOS
                         else None
                     ),
@@ -2181,7 +2188,7 @@ async def boinc_loop(
                     project_resolver_dict=project_resolver_dict,
                     lookback_period=LOOKBACK_PERIOD,
                     dump_rac_mag_ratios=(
-                        (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                        (lambda d: save_stats(d, "{}/RAC_MAG_RATIOS".format(DUMP_DIR)))
                         if DUMP_RAC_MAG_RATIOS
                         else None
                     ),
@@ -2222,11 +2229,11 @@ async def boinc_loop(
             if DUMP_PROJECT_WEIGHTS:
                 save_stats(
                     STATE_CLIENT.PROJECT_WEIGHTS,
-                    "FINAL_PROJECT_WEIGHTS",
+                    "{}/FINAL_PROJECT_WEIGHTS".format(DUMP_DIR),
                 )
                 save_stats(
                     STATE_DEV.PROJECT_WEIGHTS,
-                    "FINAL_PROJECT_WEIGHTS_DEV",
+                    "{}/FINAL_PROJECT_WEIGHTS_DEV".format(DUMP_DIR),
                 )
             # Get list of projects ordered by priority
             highest_priority_projects, priority_results = get_highest_priority_project(
@@ -2234,12 +2241,13 @@ async def boinc_loop(
                 project_weights=STATE.PROJECT_WEIGHTS,
                 attached_projects=STATE.ATTACHED_PROJECT_SET,
                 quiet=True,
+                time_mode=TIME_MODE,
             )
             if DUMP_PROJECT_PRIORITY:
                 save_stats(
                     highest_priority_projects,
-                    "HIGHEST_PRIORITY_PROJECTS{}".format(
-                        "" if not dev_loop else "_DEV"
+                    "{}/HIGHEST_PRIORITY_PROJECTS{}".format(
+                        DUMP_DIR, "" if not dev_loop else "_DEV"
                     ),
                 )
             log.debug(
@@ -2285,6 +2293,23 @@ async def boinc_loop(
 
         # Check profitability of all projects, if none profitable
         # (and user doesn't want unprofitable crunching), sleep for 1hr
+        profit_dump = {}
+        if DUMP_PROJECT_PROFIT:
+            for project in highest_priority_projects:
+                profit_dump.setdefault(
+                    project,
+                    profitability_estimate(
+                        grc_price=grc_price * currency_rate,
+                        exchange_fee=EXCHANGE_FEE,
+                        grc_sell_price=GRC_SELL_PRICE,
+                        project=project,
+                        combined_stats=COMBINED_STATS,
+                    ),
+                )
+            save_stats(
+                profit_dump,
+                "{}/PROJECT_PROFIT{}".format(DUMP_DIR, "" if not dev_loop else "_DEV"),
+            )
         if not dev_loop and ONLY_BOINC_IF_PROFITABLE:
             profit_total = 0.0
             benchmark_result = False
@@ -2292,13 +2317,16 @@ async def boinc_loop(
             for project in highest_priority_projects:
                 profit_total += (
                     (
-                        profitability_estimate(
-                            grc_price=grc_price * currency_rate,
-                            exchange_fee=EXCHANGE_FEE,
-                            grc_sell_price=GRC_SELL_PRICE,
-                            project=project,
-                            min_profit_per_hour=MIN_PROFIT_PER_HOUR,
-                            combined_stats=COMBINED_STATS,
+                        (
+                            profit_dump[project]
+                            if project in profit_dump
+                            else profitability_estimate(
+                                grc_price=grc_price * currency_rate,
+                                exchange_fee=EXCHANGE_FEE,
+                                grc_sell_price=GRC_SELL_PRICE,
+                                project=project,
+                                combined_stats=COMBINED_STATS,
+                            )
                         )
                         or 0
                     )
@@ -2428,9 +2456,7 @@ async def boinc_loop(
         # Loop through each project in order of priority and request new tasks if
         # not backed off stopping looping if cache becomes full
         dont_nnt = None
-        project_loop = (
-            highest_priority_projects # if not dev_loop else STATE_DEV.PROJECT_WEIGHTS.keys()
-        )
+        project_loop = highest_priority_projects  # if not dev_loop else STATE_DEV.PROJECT_WEIGHTS.keys()
         if dev_loop:  # Re-up suspend on main client
             timeout = make_discrepancy_timeout(owed_to_dev())
             _ = (
@@ -2779,27 +2805,6 @@ def main():
         update_check()  # Check for updates to FTM
         COMBINED_STATS = {}
         APPROVED_PROJECT_URLS = []
-        # COMBINED_STATS has format:
-        #    COMBINED_STATS_EXAMPLE = {
-        #        'HTTP://PROJECT.COM/PROJECT': {
-        #            'COMPILED_STATS': {
-        #                'AVGWALLTIME': 30.01, 'AVGCPUTIME': 10.02, 'TOTALTASKS': 51, 'TOTALWALLTIME': 223311.34,
-        #                'AVGCREDITPERHOUR': 31.2, 'XDAYWALLTIME': 30, 'AVGCREDITPERTASK': 32.12, 'AVGMAGPERHOUR': 32.1, 'TOTALCPUTIME':300010.10},
-        #            'CREDIT_HISTORY': {
-        #                '11-29-21': {'CREDITAWARDED':100.54},
-        #                '11-28-21': {'CREDITAWARDED':100.21},
-        #            },
-        #            'WU_HISTORY': {
-        #                '07-31-2021':{'STARTTIME': '1627765997', 'ESTTIME': '6128.136145', 'CPUTIME': '3621.724000',
-        #                 'ESTIMATEDFLOPS': '30000000000000', 'TASKNAME': 'wu_sf3_DS-16x271-9_Grp218448of1000000_0',
-        #                 'WALLTIME': '3643.133927', 'EXITCODE': '0'},
-        #                '07-29-2021': {'STARTTIME': '1627765996', 'ESTTIME': '6128.136145', 'CPUTIME': '3621.724000',
-        #                               'ESTIMATEDFLOPS': '30000000000000',
-        #                               'TASKNAME': 'wu_sf3_DS-16x271-9_Grp218448of1000000_0',
-        #                               'WALLTIME': '3643.133927', 'EXITCODE': '0'},
-        #            }
-        #        },
-        #    }
 
         # Check that directories exist
         log.info("Guessing BOINC data dir is " + str(BOINC_DATA_DIR))
@@ -3023,7 +3028,7 @@ def main():
                 grc_client,
                 LOOKBACK_PERIOD,
                 dump_rac_mag_ratios=(
-                    (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                    (lambda d: save_stats(d, "{}/RAC_MAG_RATIOS".format(DUMP_DIR)))
                     if DUMP_RAC_MAG_RATIOS
                     else None
                 ),
@@ -3063,7 +3068,7 @@ def main():
                 MAG_RATIOS = ProjectMagRatio.get_project_mag_ratios_from_url(
                     project_resolver_dict=project_resolver_dict,
                     dump_rac_mag_ratios=(
-                        (lambda d: save_stats(d, "RAC_MAG_RATIOS"))
+                        (lambda d: save_stats(d, "{}/RAC_MAG_RATIOS".format(DUMP_DIR)))
                         if DUMP_RAC_MAG_RATIOS
                         else None
                     ),
@@ -3130,10 +3135,10 @@ def main():
         log.debug("Printing pretty stats...")
         # Calculate starting efficiency stats
         if "STARTMAGHR" not in DATABASE:
-            DATABASE["STARTMAGHR"] = get_avg_mag_hr(COMBINED_STATS)
+            DATABASE["STARTMAGHR"] = get_avg_mag_hr(COMBINED_STATS, time_mode="WALL")
         else:
             original_avg_mag_hr = DATABASE["STARTMAGHR"]
-            current_avg_mag_hr = get_avg_mag_hr(COMBINED_STATS)
+            current_avg_mag_hr = get_avg_mag_hr(COMBINED_STATS, time_mode="WALL")
         # Generate table to print pretty
         table_dict = {}
         for project_url, stats_dict in COMBINED_STATS.items():
