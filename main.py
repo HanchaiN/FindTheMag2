@@ -28,7 +28,7 @@ try:
     import sys, signal
     import time
 
-    from utils.tune_temp import PIDController, set_temp_control
+    from utils.tune_temp import PertubationController, set_temp_control
     from utils.grc_price_utils import get_grc_price_from_sites
     from utils.currency_utils import get_currency_from_sites
     from utils.StatsHelper import (
@@ -118,8 +118,10 @@ SKIP_TABLE_UPDATES: bool = False
 ENABLE_TEMP_CONTROL = True  # Enable controlling BOINC based on temp. Default: False
 START_TEMP: int = 65
 STOP_TEMP: int = 75
-TEMP_SLEEP_TIME: float = 10
 ENABLE_TARGET_TEMP_CONTROL = False  # Enable target temp control mode. Default: False
+ENABLE_TARGET_TEMP_CONTROL_GPU = (
+    False  # Enable target temp control mode to pause GPU. Default: False
+)
 TARGET_TEMP: int = 70
 MIN_CPU_TIME_PERCENT: float = 20  # Minimum CPU time percent in target temp mode
 MAX_CPU_TIME_PERCENT: float = 100  # Maximum CPU time percent in target temp mode
@@ -155,7 +157,6 @@ LOOKBACK_PERIOD = 30
 ABORT_UNSTARTED_TASKS: bool = False
 BOINC_DATA_DIR: Union[str, None] = None
 GRIDCOIN_DATA_DIR: Union[str, None] = None
-BOINCCMD_EXEC: Union[str, None] = None
 STRICT_GRIDCOIN: bool = False
 RECALCULATE_STATS_INTERVAL: int = 60
 PRICE_CHECK_INTERVAL: int = 720
@@ -176,20 +177,13 @@ BOINC_PORT: int = 31416
 BOINC_USERNAME: Union[str, None] = None
 BOINC_PASSWORD: Union[str, None] = None
 
-# PID controller settings for target temp control mode
-PID_KULTIMATE: Union[float, None] = (
-    0.05  # PID controller ultimate gain in 1/TEMP. Default: 0.05
-)
-PID_STABLE_PERIOD: Union[float, None] = (
-    2  # PID controller stable period in minutes. Default: 2
-)
-
 CYCLE_SLEEP_TIME: float = (
     30  # There's no reason to loop through all projects more than once every 30 minutes
 )
 CYCLE_CHECK_TIME: float = 1  # Check for crunching once every 1 minute
 CYCLE_SAVE_TIME: float = 10  # Save database every ten minutes
-CYCLE_TEMP_TIME: float = 10  # Check for temperature once every ten minutes
+CYCLE_TEMP_TIME: float = 1  # Check for temperature once every 1 minute
+TEMP_SLEEP_TIME: float = 10
 
 EXIT_NNT: Union[bool, None] = None
 EXTERNAL_REQUEST_PROXIES: Dict[str, str] = {}
@@ -234,7 +228,7 @@ MAG_RATIO_SOURCE: Union[str, None] = None  # Valid values: WALLET|WEB
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
-PID_CTL: Union[PIDController, None] = None
+TEMP_TARGET_CTL: Union[PertubationController, None] = None
 
 
 @dataclasses.dataclass
@@ -372,19 +366,6 @@ if GRIDCOIN_DATA_DIR is None:
         )
 assert GRIDCOIN_DATA_DIR is not None, "GRIDCOIN_DATA_DIR is None!"
 GRIDCOIN_DATA_DIR: str = GRIDCOIN_DATA_DIR
-
-if BOINCCMD_EXEC is None:
-    if FOUND_PLATFORM == "Linux":
-        if os.path.isfile("/usr/bin/boinccmd"):
-            BOINCCMD_EXEC = "/usr/bin/boinccmd"
-        else:
-            BOINCCMD_EXEC = "/bin/boinccmd"
-    elif FOUND_PLATFORM == "Darwin":
-        BOINCCMD_EXEC = "/Applications/BOINCManager.app/Contents/resources/boinccmd"
-    else:
-        BOINCCMD_EXEC = "C:\\Program Files\\BOINC\\boinccmd.exe"
-assert BOINCCMD_EXEC is not None, "BOINCCMD_EXEC is None!"
-BOINCCMD_EXEC: str = BOINCCMD_EXEC
 
 # === Fetch update ===
 
@@ -732,11 +713,11 @@ def profitability_estimate(
     exchange_expenses = revenue_per_hour * exchange_fee
     expenses_per_hour = exchange_expenses + HOST_COST_PER_HOUR
     profit = revenue_per_hour - expenses_per_hour
-        log.debug(
+    log.debug(
         "Estimating project {} profitability. Rev is {} expenses is {} profit is {}".format(
-                project, revenue_per_hour, expenses_per_hour, profit
-            )
+            project, revenue_per_hour, expenses_per_hour, profit
         )
+    )
     return profit
 
 
@@ -762,12 +743,12 @@ def profitability_check(
     if profit is None:
         return False
     if profit < min_profit_per_hour:
-    log.debug(
+        log.debug(
             "Determined project {} is NOT profitable. Profit is {}".format(
                 project, profit
+            )
         )
-    )
-    return False
+        return False
     log.debug(
         "Determined project {} is profitable. Profit is {}".format(project, profit)
     )
@@ -1184,8 +1165,8 @@ def safe_exit(_, __) -> None:
     if os.path.exists(override_dest_path):
         print_and_log("Restoring original preferences...", "DEBUG")
         try:
-        try:
-            shutil.copy(override_dest_path, override_path)
+            try:
+                shutil.copy(override_dest_path, override_path)
             except PermissionError as e:
                 log.warning(
                     "Fallback to content read/write; Permission error restoring original preferences %s",
@@ -1364,6 +1345,7 @@ def temp_check(is_crunching: bool = True) -> bool:
     return is_crunching
 
 
+# TODO: Use controller for set and unset instead (allow overlapping change request)
 async def get_existing_modes(
     rpc_client: libs.pyboinc.rpc_client.RPCClient,
 ) -> Tuple[Union[str, None], Union[str, None]]:
@@ -1401,6 +1383,8 @@ async def get_existing_modes(
     return existing_cpu_mode, existing_gpu_mode
 
 
+# FIXME: Preferably run this in a separate loop so it doesn't block other operations;
+# Though, setting run mode may interfere with other operations so maybe not.
 async def temp_sleep(
     boinc_rpc_client: libs.pyboinc.rpc_client.RPCClient,
     max_sleep: float = -1,
@@ -1425,10 +1409,10 @@ async def temp_sleep(
     # If temp is too high:
     if temp_check():
         return 0
-    if PID_CTL is not None:
-        PID_CTL.reset()
     elapsed = 0
     while True:  # Keep sleeping until we pass a temp check
+        if TEMP_TARGET_CTL is not None:
+            TEMP_TARGET_CTL.reset(2)
         log.debug("Sleeping due to temperature")
         # Put BOINC into sleep mode, automatically reverting if
         # script closes unexpectedly
@@ -1463,26 +1447,52 @@ async def temp_sleep(
             return elapsed
 
 
-def temp_target_update() -> None:
+# FIXME: Preferrably run this in a separate loop so it doesn't block other operations;
+# Though, setting GPU mode may interfere with other operations so maybe not.
+async def temp_target_update(
+    boinc_rpc_client: libs.pyboinc.rpc_client.RPCClient,
+) -> Union[float, None]:
     global ENABLE_TARGET_TEMP_CONTROL
-    global PID_CTL
-    global BOINCCMD_EXEC
-    if not ENABLE_TARGET_TEMP_CONTROL or PID_CTL is None:
-        return
-    if (temp := temp_get()) is None:
-        return
-    PID_CTL.timestamp_update(temp, time.time() / 60)
-    DATABASE["PID_TEMP_STATE"] = PID_CTL.export_state()
-    if BOINCCMD_EXEC is None or not set_temp_control(
+    global ENABLE_TARGET_TEMP_CONTROL_GPU
+    global TEMP_TARGET_CTL
+    if not ENABLE_TARGET_TEMP_CONTROL or TEMP_TARGET_CTL is None:
+        return None
+    temps = []
+    for _ in range(5):
+        temp = temp_get()
+        if temp is not None:
+            temps.append(temp)
+        await asyncio.sleep(1)
+    err = TEMP_TARGET_CTL.update(temps, time.time())
+    DATABASE["TEMP_TARGET_STATE"] = TEMP_TARGET_CTL.export_state()
+    set_temp_ctrl_response = await set_temp_control(
+        boinc_rpc_client,
         override_path,
-        BOINCCMD_EXEC,
         (
-            DATABASE["PID_TEMP_STATE"]["clamped_ctrl"]
-            if "clamped_ctrl" in DATABASE["PID_TEMP_STATE"]
-            else PID_CTL.clamped_ctrl
+            DATABASE["TEMP_TARGET_STATE"]["ctrl"]
+            if "ctrl" in DATABASE["TEMP_TARGET_STATE"]
+            else TEMP_TARGET_CTL.ctrl
         ),
+    )
+    if not set_temp_ctrl_response:
+        TEMP_TARGET_CTL.reset(3)
+    if (
+        ENABLE_TARGET_TEMP_CONTROL_GPU
+        and TEMP_TARGET_CTL.ctrl == TEMP_TARGET_CTL.ctrl_min
     ):
-        PID_CTL.reset(2)
+        _, existing_gpu_mode = await get_existing_modes(boinc_rpc_client)
+        if not existing_gpu_mode:
+            return err
+        log.debug("Temperature target controller is clamped low, suspending GPU")
+        await run_rpc_command(
+            boinc_rpc_client,
+            "set_gpu_mode",
+            "never",
+            str(int(((60 * TEMP_SLEEP_TIME) + 60))),
+        )
+        await asyncio.sleep(60 * TEMP_SLEEP_TIME)
+        await run_rpc_command(boinc_rpc_client, "set_gpu_mode", existing_gpu_mode)
+    return err
 
 
 async def custom_sleep(
@@ -2195,20 +2205,20 @@ async def boinc_loop(
             #     config_dir_abs_path=BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
             # )
             # total_time = combined_stats_to_total_time(COMBINED_STATS)
-                (
-                    COMBINED_STATS,
+            (
+                COMBINED_STATS,
                 STATE_CLIENT.PROJECT_WEIGHTS,
-                    total_preferred_weight,
-                    total_mining_weight,
+                total_preferred_weight,
+                total_mining_weight,
                 STATE_DEV.PROJECT_WEIGHTS,
-                ) = generate_stats(
-                    approved_project_urls=APPROVED_PROJECT_URLS,
-                    preferred_projects=PREFERRED_PROJECTS,
-                    ignored_projects=IGNORED_PROJECTS,
-                    quiet=True,
-                    ignore_unattached=True,
-                    mag_ratios=MAG_RATIOS,
-                )
+            ) = generate_stats(
+                approved_project_urls=APPROVED_PROJECT_URLS,
+                preferred_projects=PREFERRED_PROJECTS,
+                ignored_projects=IGNORED_PROJECTS,
+                quiet=True,
+                ignore_unattached=True,
+                mag_ratios=MAG_RATIOS,
+            )
             if DUMP_PROJECT_WEIGHTS:
                 save_stats(
                     STATE_CLIENT.PROJECT_WEIGHTS,
@@ -2283,13 +2293,13 @@ async def boinc_loop(
                 profit_total += (
                     (
                         profitability_estimate(
-                    grc_price=grc_price * currency_rate,
-                    exchange_fee=EXCHANGE_FEE,
-                    grc_sell_price=GRC_SELL_PRICE,
-                    project=project,
-                    min_profit_per_hour=MIN_PROFIT_PER_HOUR,
-                    combined_stats=COMBINED_STATS,
-                )
+                            grc_price=grc_price * currency_rate,
+                            exchange_fee=EXCHANGE_FEE,
+                            grc_sell_price=GRC_SELL_PRICE,
+                            project=project,
+                            min_profit_per_hour=MIN_PROFIT_PER_HOUR,
+                            combined_stats=COMBINED_STATS,
+                        )
                         or 0
                     )
                     * STATE.PROJECT_WEIGHTS.get(project, 0)
@@ -2308,10 +2318,10 @@ async def boinc_loop(
                     "No projects currently profitable and no benchmarking required, sleeping for 1 hour and killing all non-started tasks"
                 )
                 if ABORT_UNSTARTED_TASKS:
-                try:
-                    await kill_all_unstarted_tasks(rpc_client=rpc_client)
-                except Exception as e:
-                    pass
+                    try:
+                        await kill_all_unstarted_tasks(rpc_client=rpc_client)
+                    except Exception as e:
+                        pass
                 await nnt_all_projects(rpc_client)
                 DATABASE["TABLE_SLEEP_REASON"] = (
                     "No profitable projects and no benchmarking required, sleeping 1 hr."
@@ -2356,7 +2366,7 @@ async def boinc_loop(
                     await asyncio.sleep(30)
                     tries += 1
                 else:
-                        log.error("Giving up on connecting to BOINC dev client")
+                    log.error("Giving up on connecting to BOINC dev client")
             if dev_rpc_client is not None:
                 # Set main BOINC to suspend until we're done crunching in dev mode.
                 # It will automatically re-enable itself in 100x the time if nothing
@@ -2401,10 +2411,10 @@ async def boinc_loop(
                     )  # Run the BOINC loop :)
                 else:
                     log.error("Unable to start dev mode due to unknown last mode")
-                    await dev_cleanup(dev_rpc_client)
-                    log.debug("dev_cleanup_called it appears boinc_loop ended")
-                    update_table(dev_loop=dev_loop)
-                    DEV_LOOP_RUNNING = False
+                await dev_cleanup(dev_rpc_client)
+                log.debug("dev_cleanup_called it appears boinc_loop ended")
+                update_table(dev_loop=dev_loop)
+                DEV_LOOP_RUNNING = False
                 if existing_cpu_mode and existing_gpu_mode:  # Re-enable client BOINC
                     _ = (
                         await run_rpc_command(
@@ -2679,7 +2689,7 @@ def main():
     global override_path
     global override_dest_path
     global grc_client
-    global PID_CTL
+    global TEMP_TARGET_CTL
 
     global BOINC_PASSWORD
 
@@ -2749,12 +2759,11 @@ def main():
         save_stats(DATABASE)
 
     if ENABLE_TARGET_TEMP_CONTROL:
-        PID_CTL = PIDController(0, TARGET_TEMP)
-        PID_CTL.clamped_low = MIN_CPU_TIME_PERCENT
-        PID_CTL.clamped_high = MAX_CPU_TIME_PERCENT
-        PID_CTL.k_ultimate = PID_KULTIMATE
-        PID_CTL.stable_period = PID_STABLE_PERIOD
-        PID_CTL.import_state(DATABASE.get("PID_TEMP_STATE", {}))
+        TEMP_TARGET_CTL = PertubationController(TARGET_TEMP)
+        TEMP_TARGET_CTL.ctrl_min = MIN_CPU_TIME_PERCENT / 100
+        TEMP_TARGET_CTL.ctrl_max = MAX_CPU_TIME_PERCENT / 100
+        TEMP_TARGET_CTL.ctrl = (TEMP_TARGET_CTL.ctrl_min + TEMP_TARGET_CTL.ctrl_max) / 2
+        TEMP_TARGET_CTL.import_state(DATABASE.get("TEMP_TARGET_STATE", {}))
 
     # These vars should reset and/or checked each run
     DATABASE["TABLE_STATUS"] = ""
@@ -2835,14 +2844,14 @@ def main():
             try:
                 with open(auth_location, "r") as f:
                     data = f.read().rstrip()
-                    if data != "":
-                        BOINC_PASSWORD = data
+                if data != "":
+                    BOINC_PASSWORD = data
             except Exception as e:
                 # This error can generally be disregarded on Linux/OSX
                 print_and_log(
                     "Error reading boinc RPC file at {}: {}".format(auth_location, e),
                     "ERROR" if "WINDOWS" in FOUND_PLATFORM.upper() else "DEBUG",
-                    )
+                )
 
         # Check that project weights make sense
         total_found_values = 0
