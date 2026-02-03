@@ -733,17 +733,19 @@ def profitability_check(
     project: str,
     min_profit_per_hour: float,
     combined_stats: dict,
+    profit: Union[float, None] = None,
 ) -> bool:
     """
     Returns True if crunching is profitable right now. False if otherwise or unable to determine.
     """
-    profit = profitability_estimate(
-        grc_price,
-        exchange_fee,
-        grc_sell_price,
-        project,
-        combined_stats,
-    )
+    if profit is None:
+        profit = profitability_estimate(
+            grc_price,
+            exchange_fee,
+            grc_sell_price,
+            project,
+            combined_stats,
+        )
     if profit is None:
         return False
     if profit < min_profit_per_hour:
@@ -2091,7 +2093,7 @@ async def boinc_loop(
     global STATE_DEV
     global COMBINED_STATS
     global total_preferred_weight
-    global highest_priority_projects
+    global priority_projects
     global priority_results
     global DEV_BOINC_PASSWORD
     global DEV_LOOP_RUNNING
@@ -2236,7 +2238,7 @@ async def boinc_loop(
                     "{}/FINAL_PROJECT_WEIGHTS_DEV".format(DUMP_DIR),
                 )
             # Get list of projects ordered by priority
-            highest_priority_projects, priority_results = get_highest_priority_project(
+            priority_projects, priority_results = get_highest_priority_project(
                 combined_stats=COMBINED_STATS,
                 project_weights=STATE.PROJECT_WEIGHTS,
                 attached_projects=STATE.ATTACHED_PROJECT_SET,
@@ -2245,20 +2247,23 @@ async def boinc_loop(
             )
             if DUMP_PROJECT_PRIORITY:
                 save_stats(
-                    highest_priority_projects,
-                    "{}/HIGHEST_PRIORITY_PROJECTS{}".format(
+                    priority_projects,
+                    "{}/PROJECT_PRIORITY{}".format(
                         DUMP_DIR, "" if not dev_loop else "_DEV"
                     ),
                 )
-            log.debug(
-                "Highest priority projects are: " + str(highest_priority_projects)
-            )
+            log.debug("Sorted projects by priority are: " + str(priority_projects))
             # Print some pretty stats
             update_table(dev_loop=dev_loop)
 
+        highest_priority_projects = []
+        for project in priority_projects:
+            priority = priority_results.get(priority_projects[0], 0)
+            if priority == priority_results.get(project, 0):
+                highest_priority_projects.append(project)
         log.info(
-            "Highest priority project is {} in mode".format(
-                highest_priority_projects[0], mode
+            "Highest priority projects are {} in mode {}".format(
+                highest_priority_projects, mode
             )
         )
 
@@ -2291,11 +2296,14 @@ async def boinc_loop(
         currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
         assert currency_rate is not None, "Currency rate should not be None here"
 
+        log.info("Found grc price %f %s/GRC", grc_price * currency_rate, CURRENCY_CODE)
+
         # Check profitability of all projects, if none profitable
         # (and user doesn't want unprofitable crunching), sleep for 1hr
         profit_dump = {}
+        benchmark_dump = {}
         if DUMP_PROJECT_PROFIT:
-            for project in highest_priority_projects:
+            for project in priority_projects:
                 profit_dump.setdefault(
                     project,
                     profitability_estimate(
@@ -2306,15 +2314,29 @@ async def boinc_loop(
                         combined_stats=COMBINED_STATS,
                     ),
                 )
+                benchmark_dump.setdefault(
+                    project,
+                    benchmark_check(
+                        project_url=project,
+                        combined_stats=COMBINED_STATS,
+                        benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
+                        benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
+                        benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
+                        skip_benchmarking=SKIP_BENCHMARKING,
+                    ),
+                )
             save_stats(
-                profit_dump,
+                {
+                    project: profit if benchmark_dump.get(project, True) else None
+                    for project, profit in profit_dump.items()
+                },
                 "{}/PROJECT_PROFIT{}".format(DUMP_DIR, "" if not dev_loop else "_DEV"),
             )
         if not dev_loop and ONLY_BOINC_IF_PROFITABLE:
             profit_total = 0.0
             benchmark_result = False
 
-            for project in highest_priority_projects:
+            for project in priority_projects:
                 profit_total += (
                     (
                         (
@@ -2333,13 +2355,17 @@ async def boinc_loop(
                     * STATE.PROJECT_WEIGHTS.get(project, 0)
                     / 1000.0
                 )
-                benchmark_result = benchmark_result or benchmark_check(
-                    project_url=project,
-                    combined_stats=STATE.PROJECT_WEIGHTS,
-                    benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
-                    benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
-                    benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
-                    skip_benchmarking=SKIP_BENCHMARKING,
+                benchmark_result = benchmark_result or (
+                    benchmark_dump[project]
+                    if project in benchmark_dump
+                    else benchmark_check(
+                        project_url=project,
+                        combined_stats=COMBINED_STATS,
+                        benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
+                        benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
+                        benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
+                        skip_benchmarking=SKIP_BENCHMARKING,
+                    )
                 )
             if not benchmark_result and profit_total < MIN_PROFIT_PER_HOUR:
                 log.info(
@@ -2455,8 +2481,6 @@ async def boinc_loop(
 
         # Loop through each project in order of priority and request new tasks if
         # not backed off stopping looping if cache becomes full
-        dont_nnt = None
-        project_loop = highest_priority_projects  # if not dev_loop else STATE_DEV.PROJECT_WEIGHTS.keys()
         if dev_loop:  # Re-up suspend on main client
             timeout = make_discrepancy_timeout(owed_to_dev())
             _ = (
@@ -2473,44 +2497,44 @@ async def boinc_loop(
                     str(timeout * 60 * 60 * 10),
                 ),
             )
-        for highest_priority_project in project_loop:
-            if highest_priority_project in IGNORED_PROJECTS:
-                log.debug(
-                    "Skipping project bc in ignore list: {}".format(
-                        highest_priority_project
-                    )
-                )
+        for project in priority_projects:
+            # highest_priority_projects if not dev_loop else STATE_DEV.PROJECT_WEIGHTS.keys()
+            if project in IGNORED_PROJECTS:
+                log.debug("Skipping project bc in ignore list: {}".format(project))
                 continue
             boincified_url = resolve_url_boinc_rpc(
-                highest_priority_project,
+                project,
                 known_attached_projects=STATE.ATTACHED_PROJECT_SET,
                 known_boinc_projects=ALL_PROJECT_URLS,
             )
-            database_url = resolve_url_database(highest_priority_project)
-            profitability_result = profitability_check(
-                grc_price=grc_price * currency_rate,
-                exchange_fee=EXCHANGE_FEE,
-                grc_sell_price=GRC_SELL_PRICE,
-                project=highest_priority_project,
-                min_profit_per_hour=MIN_PROFIT_PER_HOUR,
-                combined_stats=COMBINED_STATS,
-            )
-            benchmark_result = benchmark_check(
-                project_url=database_url,
-                combined_stats=COMBINED_STATS,
-                benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
-                benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
-                benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
-                skip_benchmarking=SKIP_BENCHMARKING,
-            )
+            database_url = resolve_url_database(project)
             # If user has set to only mine highest mag project if profitable and
             # it's not profitable or in benchmarking mode, skip
             if (
                 (ONLY_MINE_IF_PROFITABLE or ONLY_BOINC_IF_PROFITABLE)
-                and not benchmark_result
-                and not profitability_result
                 and not dev_loop
                 and database_url not in PREFERRED_PROJECTS
+                and not (
+                    benchmark_dump[project]
+                    if project in benchmark_dump
+                    else benchmark_check(
+                        project_url=database_url,
+                        combined_stats=COMBINED_STATS,
+                        benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
+                        benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
+                        benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
+                        skip_benchmarking=SKIP_BENCHMARKING,
+                    )
+                )
+                and not profitability_check(
+                    grc_price=grc_price * currency_rate,
+                    exchange_fee=EXCHANGE_FEE,
+                    grc_sell_price=GRC_SELL_PRICE,
+                    project=project,
+                    min_profit_per_hour=MIN_PROFIT_PER_HOUR,
+                    combined_stats=COMBINED_STATS,
+                    # profit=profit_dump.get(project),
+                )
             ):
                 DATABASE["TABLE_STATUS"] = (
                     "Skipping work fetch for {} bc not profitable".format(database_url)
@@ -2535,9 +2559,7 @@ async def boinc_loop(
             backoff_period = DATABASE[mode].get(database_url, {}).get("BACKOFF", 0)
             if minutes_since_last_project_check < backoff_period:
                 DATABASE["TABLE_STATUS"] = (
-                    "Skipping {} due to backoff period...".format(
-                        highest_priority_project
-                    )
+                    "Skipping {} due to backoff period...".format(project)
                 )
                 update_table(dev_loop=dev_loop)
                 log.debug(
@@ -2607,7 +2629,7 @@ async def boinc_loop(
                         )  # We need to re-fetch this as it's now changed
                         STATE.ATTACHED_PROJECT_SET.update(temp_project_list)
                         boincified_url = resolve_url_boinc_rpc(
-                            highest_priority_project,
+                            project,
                             known_attached_projects=STATE.ATTACHED_PROJECT_SET,
                             known_boinc_projects=ALL_PROJECT_URLS,
                         )  # This may have changed, so check
@@ -2624,9 +2646,7 @@ async def boinc_loop(
             DATABASE["TABLE_STATUS"] = "Allowing new tasks & updating {}".format(
                 project_name
             )
-            log.info(
-                "Allowing new tasks and updating {}".format(highest_priority_project)
-            )
+            log.info("Allowing new tasks and updating {}".format(project))
             update_table(dev_loop=dev_loop)
             allow_response = await run_rpc_command(
                 rpc_client, "project_allowmorework", "project_url", boincified_url
@@ -2685,15 +2705,16 @@ async def boinc_loop(
         # Allow highest priority project to be non-NNTd.
         # This enables BOINC to fetch work if it's needed before our
         # sleep period elapses
-        dont_nnt = resolve_url_database(project_loop[0])
-        allow_this_project = resolve_url_boinc_rpc(
-            dont_nnt,
-            known_attached_projects=STATE.ATTACHED_PROJECT_SET,
-            known_boinc_projects=ALL_PROJECT_URLS,
-        )
-        allow_response = await run_rpc_command(
-            rpc_client, "project_allowmorework", "project_url", allow_this_project
-        )
+        for project in highest_priority_projects:
+            dont_nnt = resolve_url_database(project)
+            allow_this_project = resolve_url_boinc_rpc(
+                dont_nnt,
+                known_attached_projects=STATE.ATTACHED_PROJECT_SET,
+                known_boinc_projects=ALL_PROJECT_URLS,
+            )
+            allow_response = await run_rpc_command(
+                rpc_client, "project_allowmorework", "project_url", allow_this_project
+            )
         # There's no reason to loop through all projects too often.
         await custom_sleep(CYCLE_SLEEP_TIME, rpc_client, dev_loop=dev_loop)
 
@@ -3286,6 +3307,7 @@ def main():
             sys.exit(e.code)
         except Exception as e:
             print_and_log("Error in main boinc loop: {}".format(e), "ERROR")
+            raise
     # Restore user prefs
     safe_exit(None, None)
 
