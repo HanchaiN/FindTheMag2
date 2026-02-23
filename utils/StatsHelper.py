@@ -5,7 +5,7 @@ import os
 import functools
 import logging
 import re
-from typing import Collection, Dict, List, Literal, Tuple, Union
+from typing import Any, Collection, Container, Dict, Iterable, List, Literal, Tuple, Union
 from utils.utils import EquivalentWrapper, combine_dicts, in_list, resolve_url_database
 import datetime
 import xmltodict
@@ -380,11 +380,8 @@ def config_files_to_stats(
 
 
 def add_mag_to_combined_stats(
-    combined_stats: dict,
-    mag_ratios: Union[Dict[str, float], None],
-    approved_projects: List[str],
-    preferred_projects: List[str],
-) -> Tuple[dict, List[str]]:
+    combined_stats: dict, mag_ratios: Union[Dict[str, float], None]
+) -> dict:
     """Adds magnitude ratios to combined statistics
 
     Args:
@@ -394,22 +391,16 @@ def add_mag_to_combined_stats(
         approved_projects:
         preferred_projects:
 
-    Returns: A tuple consisting of:
-        COMBINED_STATS with magnitude ratios added to it,
-        list of projects which are being crunched but not on approved projects list.
+    Returns: COMBINED_STATS with magnitude ratios added to it.
     """
-    unapproved_list = []
     if not mag_ratios:
         log.error(
             "In add_mag_to_combined_ratios but mag_ratios is empty. Setting all mag ratios to zero."
         )
         mag_ratios = {}
     for project_url, project_stats in combined_stats.items():
-        found_mag_ratio = mag_ratios.get(project_url, 0)
+        found_mag_ratio = mag_ratios.get(project_url, 0) # mag / rac = mag day / cred
         if not found_mag_ratio:
-            if project_url not in approved_projects:
-                if project_url not in preferred_projects:
-                    unapproved_list.append(project_url)
             project_stats["COMPILED_STATS"]["AVGMAGPERWALLHOUR"] = 0
             project_stats["COMPILED_STATS"]["AVGMAGPERCPUHOUR"] = 0
             project_stats["COMPILED_STATS"]["MAGPERCREDIT"] = 0
@@ -423,7 +414,39 @@ def add_mag_to_combined_stats(
             * project_stats["COMPILED_STATS"].get("AVGCREDITPERCPUHOUR", 0)
         )
         project_stats["COMPILED_STATS"]["MAGPERCREDIT"] = found_mag_ratio
-    return combined_stats, unapproved_list
+    return combined_stats
+
+
+def get_unapproved_list(
+    project_urls: Iterable[str],
+    mag_ratios: Union[Dict[str, float], None],
+    approved_projects: Container[str],
+    preferred_projects: Container[str],
+) -> List[str]:
+    """Adds magnitude ratios to combined statistics
+
+    Args:
+        combined_stats: COMBINED_STATS from main.py.
+        mag_ratios: Magnitude ratios returned from get_project_mag_ratios.
+            A dictionary with project URL as key and magnitude ratio as value
+        approved_projects:
+        preferred_projects:
+
+    Returns: list of projects which are being crunched but not on approved projects list.
+    """
+    unapproved_list = []
+    if not mag_ratios:
+        log.error(
+            "In add_mag_to_combined_ratios but mag_ratios is empty. Setting all mag ratios to zero."
+        )
+        mag_ratios = {}
+    for project_url in project_urls:
+        found_mag_ratio = mag_ratios.get(project_url, 0)
+        if not found_mag_ratio:
+            if project_url not in approved_projects:
+                if project_url not in preferred_projects:
+                    unapproved_list.append(project_url)
+    return unapproved_list
 
 
 def is_project_eligible(
@@ -462,7 +485,7 @@ def get_most_mag_efficient_projects(
     ignored_projects: List[str],
     percentdiff: int = 10,
     quiet: bool = False,
-    time_mode: Literal["WALL", "CPU"] = "WALL",
+    time_mode: Literal["WALL", "CPU", "MAX", "MIN"] = "WALL",
 ) -> List[str]:
     """Determines most magnitude efficient project(s).
 
@@ -488,10 +511,14 @@ def get_most_mag_efficient_projects(
     for project_url, project_stats in combinedstats.items():
         if project_url in ignored_projects:
             continue
-        current_mag_per_hour = project_stats["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
-        highest_mag_per_hour = combinedstats[highest_project]["COMPILED_STATS"][
-            "AVGMAGPER{}HOUR".format(time_mode)
-        ]
+        current_mag_per_hour = read_compiled_stats_time(
+            project_stats["COMPILED_STATS"], "AVGMAGPER{}HOUR", time_mode
+        )
+        highest_mag_per_hour = read_compiled_stats_time(
+            combinedstats[highest_project]["COMPILED_STATS"],
+            "AVGMAGPER{}HOUR",
+            time_mode,
+        )
         if current_mag_per_hour > highest_mag_per_hour and is_project_eligible(
             project_url, project_stats, ignored_projects
         ):
@@ -501,22 +528,34 @@ def get_most_mag_efficient_projects(
             print(
                 "\n\nHighest mag/hr project --with at least 10 completed WUs-- is {} w/ {}/hr of credit.".format(
                     highest_project.lower(),
-                    combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)],
+                    read_compiled_stats_time(
+                        combinedstats[highest_project]["COMPILED_STATS"],
+                        "AVGMAGPER{}HOUR",
+                        time_mode,
+                    ),
                 )
             )
         log.info(
             "Highest mag/hr project //with at least 10 completed WUs// is {} w/ {}/hr of credit.".format(
                 highest_project,
-                combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)],
+                read_compiled_stats_time(
+                    combinedstats[highest_project]["COMPILED_STATS"],
+                    "AVGMAGPER{}HOUR",
+                    time_mode,
+                ),
             )
         )
     return_list.append(highest_project)
 
     # then compare other projects to it to see if any are within percentdiff of it
-    highest_avg_mag = combinedstats[highest_project]["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
+    highest_avg_mag = read_compiled_stats_time(
+        combinedstats[highest_project]["COMPILED_STATS"], "AVGMAGPER{}HOUR", time_mode
+    )
     minimum_for_inclusion = highest_avg_mag - (highest_avg_mag * (percentdiff / 100))
     for project_url, project_stats in combinedstats.items():
-        current_avg_mag = project_stats["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
+        current_avg_mag = read_compiled_stats_time(
+            project_stats["COMPILED_STATS"], "AVGMAGPER{}HOUR", time_mode
+        )
         if project_url == highest_project:
             continue
         if project_url in ignored_projects:
@@ -624,7 +663,7 @@ def get_highest_priority_project(
     project_weights: Dict[str, int],
     attached_projects: Union[Collection[str], None] = None,
     quiet: bool = False,
-    time_mode: Literal["WALL", "CPU"] = "WALL",
+    time_mode: TimeMode = "WALL",
 ) -> Tuple[List[str], Dict[str, float]]:
     """
     Given STATS, return list of projects sorted by priority. Note that "benchmark" projects are compared to TOTAL time
@@ -637,8 +676,12 @@ def get_highest_priority_project(
     total_xday_time = 0
     total_time = 0
     for found_key, projectstats in combined_stats.items():
-        total_xday_time += projectstats["COMPILED_STATS"]["XDAY{}TIME".format(time_mode)]
-        total_time += projectstats["COMPILED_STATS"]["TOTAL{}TIME".format(time_mode)]
+        total_xday_time += read_compiled_stats_time(
+            projectstats["COMPILED_STATS"], "XDAY{}TIME", time_mode
+        )
+        total_time += read_compiled_stats_time(
+            projectstats["COMPILED_STATS"], "TOTAL{}TIME", time_mode
+        )
     # print('Calculating project weights: total time is {}'.format(total_xday_time))
     log.debug(
         "Calculating project weights: total windowed time is {}".format(total_xday_time)
@@ -665,11 +708,13 @@ def get_highest_priority_project(
             if (
                 weight == 1
             ):  # Benchmarking projects should be over ALL time not just recent time
-                existing_time = combined_stats_extract["COMPILED_STATS"][
-                    "TOTAL{}TIME".format(time_mode)
-                ]
+                existing_time = read_compiled_stats_time(
+                    combined_stats_extract["COMPILED_STATS"], "TOTAL{}TIME", time_mode
+                )
             else:
-                existing_time = combined_stats_extract["COMPILED_STATS"]["XDAY{}TIME".format(time_mode)]
+                existing_time = read_compiled_stats_time(
+                    combined_stats_extract["COMPILED_STATS"], "XDAY{}TIME", time_mode
+                )
         if weight == 1:
             target_time = existing_time - (total_time * (weight / 1000))
         else:
@@ -697,17 +742,54 @@ def get_highest_priority_project(
         return [], {}
 
 
-def get_avg_mag_hr(combined_stats: dict, time_mode: Literal["WALL", "CPU"] = "WALL") -> float:
+_sentinel = object()
+type TimeMode = Literal["WALL", "CPU", "MAX", "MIN"]
+
+
+def read_compiled_stats_time(
+    compiled_stats: dict,
+    dict_key: str,
+    time_mode: TimeMode = "WALL",
+    defaults: Any = _sentinel,
+):
+    if time_mode in ["WALL", "CPU"]:
+        if defaults is _sentinel:
+            return compiled_stats[dict_key.format(time_mode)]
+        else:
+            return compiled_stats.get(dict_key.format(time_mode), defaults)
+
+    wall_time = read_compiled_stats_time(
+        compiled_stats, dict_key, "WALL", defaults=None
+    )
+    cpu_time = read_compiled_stats_time(compiled_stats, dict_key, "CPU", defaults=None)
+    if wall_time is None:
+        return cpu_time
+    if cpu_time is None:
+        return wall_time
+
+    if time_mode == "MIN":
+        return min(wall_time, cpu_time)
+    if time_mode == "MAX":
+        return max(wall_time, cpu_time)
+
+    log.error(f"Invalid time_mode: {time_mode}")
+    return wall_time
+
+
+def get_avg_mag_hr(combined_stats: dict, time_mode: TimeMode = "WALL") -> float:
     """
     Get average mag/hr over all projects to date
     """
     found_mag = []
     found_time = []
     for project_url, stats in combined_stats.items():
-        total_hours = stats["COMPILED_STATS"]["TOTAL{}TIME".format(time_mode)]
-        total_mag = (
-            stats["COMPILED_STATS"]["TOTAL{}TIME".format(time_mode)]
-            * stats["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(time_mode)]
+        total_hours = read_compiled_stats_time(
+            stats["COMPILED_STATS"], "TOTAL{}TIME", time_mode
+        )
+        total_mag = read_compiled_stats_time(
+            stats["COMPILED_STATS"], "TOTAL{}TIME", time_mode
+        ) * read_compiled_stats_time(
+            stats["COMPILED_STATS"], "AVGMAGPER{}HOUR", time_mode
         )
         found_mag.append(total_mag)
         found_time.append(total_hours)

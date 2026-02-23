@@ -88,6 +88,7 @@ class PertubationController:
         self.min_error = 0.5
         self.step_growth = 0.1
         self.hist_size = 5
+        self.bias = +1
 
         self.step = 0.1
         self.ctrl = 0.5
@@ -154,34 +155,36 @@ class PertubationController:
             sign = 1
         if error < -min_error:
             sign = -1
-        if sign != 0:
-            log.debug("Temp ctl update: sign=%d (error=%.02f)", sign, error)
-            self.sign_history.append(sign)
-            if len(self.sign_history) > self.hist_size:
-                self.sign_history.pop(0)
+        log.debug("Temp ctl update: sign=%d (error=%.02f)", sign, error)
+        self.sign_history.append(sign)
+        if len(self.sign_history) > self.hist_size:
+            self.sign_history.pop(0)
         self.time_history.append(delta_time)
         if len(self.time_history) > self.hist_size:
             a = self.time_history.pop(0)
             b = self.time_history.pop(0)
             self.time_history.insert(0, (a + b) / 2.0)
+        acc = sum(self.sign_history)
         sign = 0
-        if sum(self.sign_history) > 0:
+        if acc > 0:
             sign = 1
-        if sum(self.sign_history) < 0:
+        if acc < 0:
             sign = -1
+        if acc == 0:
+            sign = 0 if self.bias == 0 else 1 if self.bias >= 0 else -1
+        if sign == self.last_sign and sign != 0:
+            self.step *= 1.0 + self.step_growth
+        elif sign != self.last_sign:
+            self.step *= 1.0 - self.step_growth
+            self.last_sign = sign
+        if self.ctrl == self.ctrl_min or self.ctrl == self.ctrl_max:
+            self.step = self.step_min
+        self.step = max(self.step_min, min(self.step_max, self.step))
         if sign != 0:
             log.debug("Temp ctl update: sign=%d; step=%.04f", sign, self.step)
             self.ctrl += sign * min(
                 self.step_max_abs,
                 self.step * delta_time**self.step_time_deg,
             )
-        if sign == self.last_sign and sign != 0:
-            self.step *= 1.0 + self.step_growth
-        elif sign != self.last_sign:
-            self.step *= 1.0 - self.step_growth
-            self.last_sign = sign
         self.ctrl = max(self.ctrl_min, min(self.ctrl_max, self.ctrl))
-        if self.ctrl == self.ctrl_min or self.ctrl == self.ctrl_max:
-            self.step = self.step_min
-        self.step = max(self.step_min, min(self.step_max, self.step))
         return error

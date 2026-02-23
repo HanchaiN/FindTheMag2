@@ -38,6 +38,9 @@ try:
         get_most_mag_efficient_projects,
         resolve_url_boinc_rpc,
         get_avg_mag_hr,
+        TimeMode,
+        read_compiled_stats_time,
+        get_unapproved_list,
     )
     from utils.BoincClientConnection import (
         BoincClientConnection,
@@ -116,13 +119,14 @@ SCRIPTED_RUN: bool = False
 SKIP_TABLE_UPDATES: bool = False
 
 ENABLE_TEMP_CONTROL = True  # Enable controlling BOINC based on temp. Default: False
-START_TEMP: int = 65
-STOP_TEMP: int = 75
+START_TEMP: float = 65
+STOP_TEMP: float = 75
 ENABLE_TARGET_TEMP_CONTROL = False  # Enable target temp control mode. Default: False
 ENABLE_TARGET_TEMP_CONTROL_GPU = (
     False  # Enable target temp control mode to pause GPU. Default: False
 )
-TARGET_TEMP: int = 70
+TARGET_TEMP_MIN: float = 87
+TARGET_TEMP_MAX: float = 90
 MIN_CPU_TIME_PERCENT: float = 20  # Minimum CPU time percent in target temp mode
 MAX_CPU_TIME_PERCENT: float = 100  # Maximum CPU time percent in target temp mode
 TEMP_URL: str | None = None
@@ -202,6 +206,7 @@ DEV_EXIT_TEST: bool = False  # Only used for testing
 # keys integer vs string.
 CPU_MODE_DICT = {1: "always", 2: "auto", 3: "never"}
 GPU_MODE_DICT = {"1": "always", "2": "auto", "3": "never"}
+MAGNITUDE_UNIT = 0.25
 
 # Some globals we need. I try to have all globals be ALL CAPS
 TESTING: bool = False
@@ -227,7 +232,7 @@ ALL_PROJECT_URLS = set()
 ALL_BOINC_PROJECTS = dict()
 COMBINED_STATS = {}
 MAG_RATIO_SOURCE: Union[str, None] = None  # Valid values: WALLET|WEB
-TIME_MODE: Literal["WALL", "CPU"] = "WALL"  # Valid values: WALL|CPU
+TIME_MODE: TimeMode = "WALL"  # Valid values: WALL|CPU|MAX|MIN
 SAVE_STATS_DB = (
     {}
 )  # Keeps cache of saved stats databases so we don't write more often than we need too
@@ -671,20 +676,13 @@ def get_approved_project_urls_web(
 # === Check!!! ===
 
 
-def profitability_estimate(
-    grc_price: float,
-    exchange_fee: float,
-    grc_sell_price: Union[None, float],
+def grc_revenue_estimate(
     project: str,
     combined_stats: dict,
 ) -> Union[float, None]:
     """
     Returns Average profit per hour crunching given project and GRC price info.
     """
-    if not grc_sell_price:
-        grc_sell_price = 0.00
-    if not isinstance(grc_price, float) and not isinstance(grc_price, int):
-        return False
     combined_stats_extract = combined_stats.get(project)
     if not combined_stats_extract:
         log.error(
@@ -701,35 +699,69 @@ def profitability_estimate(
         )
         return None
     if (
-        "AVGMAGPER{}HOUR".format(TIME_MODE)
-        not in combined_stats_extract["COMPILED_STATS"]
-    ):
+        avgmagperhour := read_compiled_stats_time(
+            combined_stats_extract["COMPILED_STATS"],
+            "AVGMAGPER{}HOUR",
+            time_mode=TIME_MODE,
+            defaults=None,
+        )
+    ) is None:
         log.error(
             "Error: Unable to calculate profitability for project {} bc we have no stats for it (AVGMAGPERHOUR)".format(
                 project
             )
         )
         return None
-    revenue_per_hour = (
-        combined_stats_extract["COMPILED_STATS"]["AVGMAGPER{}HOUR".format(TIME_MODE)]
-        / 4
-        * max(grc_price, grc_sell_price)
+
+    # = grc / (day * mag) * [mag / hour]
+    # = grc / (day * mag) * cred / hour * mag / rac
+    # = grc / (day * mag) * cred / hour * mag / (cred / day)
+    # = grc / (day * mag) * (mag day) / hour
+    # = grc / hour
+    return MAGNITUDE_UNIT * avgmagperhour
+
+
+def get_min_grc_per_hour(
+    grc_price: float,
+    exchange_fee: float,
+    min_profit_per_hour: float,
+) -> float:
+    min_revenue_per_hour = (min_profit_per_hour + HOST_COST_PER_HOUR) / (
+        1 - exchange_fee
     )
+    min_grc_per_hour = min_revenue_per_hour / grc_price
+    return min_grc_per_hour
+
+
+def profitability_estimate(
+    grc_price: float,
+    exchange_fee: float,
+    project: str,
+    combined_stats: dict,
+) -> Union[float, None]:
+    """
+    Returns Average profit per hour crunching given project and GRC price info.
+    """
+    if not isinstance(grc_price, float) and not isinstance(grc_price, int):
+        return None
+    grc_per_hour = grc_revenue_estimate(project, combined_stats)
+    if grc_per_hour is None:
+        return None
+    revenue_per_hour = grc_per_hour * grc_price
     exchange_expenses = revenue_per_hour * exchange_fee
     expenses_per_hour = exchange_expenses + HOST_COST_PER_HOUR
-    profit = revenue_per_hour - expenses_per_hour
+    profit_per_hour = revenue_per_hour - expenses_per_hour
     log.debug(
         "Estimating project {} profitability. Rev is {} expenses is {} profit is {}".format(
-            project, revenue_per_hour, expenses_per_hour, profit
+            project, revenue_per_hour, expenses_per_hour, profit_per_hour
         )
     )
-    return profit
+    return profit_per_hour
 
 
 def profitability_check(
     grc_price: float,
     exchange_fee: float,
-    grc_sell_price: Union[None, float],
     project: str,
     min_profit_per_hour: float,
     combined_stats: dict,
@@ -742,7 +774,6 @@ def profitability_check(
         profit = profitability_estimate(
             grc_price,
             exchange_fee,
-            grc_sell_price,
             project,
             combined_stats,
         )
@@ -793,8 +824,11 @@ def benchmark_check(
         log.error("Unable to find project in benchmark_check".format(project_url))
         return True
     if (
-        combined_stats_extract.get("COMPILED_STATS", {}).get(
-            "TOTAL{}TIME".format(TIME_MODE), 0
+        read_compiled_stats_time(
+            combined_stats_extract.get("COMPILED_STATS", {}),
+            "TOTAL{}TIME",
+            time_mode=TIME_MODE,
+            defaults=0,
         )
         < benchmarking_minimum_time
     ):
@@ -839,7 +873,8 @@ def create_default_database() -> Dict[str, Any]:
     return DATABASE
 
 
-def generate_stats(
+def generate_weight(
+    combined_stats: dict,
     approved_project_urls: Union[List[str], None] = None,
     preferred_projects: Union[Dict[str, float], None] = None,
     ignored_projects: Union[List[str], None] = None,
@@ -848,6 +883,8 @@ def generate_stats(
     mag_ratios: Union[Dict[str, float], None] = None,
     quiet: bool = False,
     ignore_unattached: bool = False,
+    is_dev: bool = False,
+    min_grc_per_hour: float = 0,
 ):
     if approved_project_urls is None:
         approved_project_urls = APPROVED_PROJECT_URLS
@@ -859,16 +896,9 @@ def generate_stats(
         known_attached_projects = STATE_CLIENT.ATTACHED_PROJECT_SET
     if known_boinc_projects is None:
         known_boinc_projects = ALL_PROJECT_URLS
-    weak_stats = []
-    combined_stats = config_files_to_stats(
-        BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
-    )
     if not quiet:
         print_and_log("Calculating project weights...", "INFO")
         print("Curing some cancer along the way...")
-    # Calculate project weights w/ credit/hr
-    final_project_weights = {}
-    dev_project_weights = {}
     # Canonicalize PREFERRED_PROJECTS list
     to_del = []
     for url in preferred_projects.keys():
@@ -881,6 +911,7 @@ def generate_stats(
         del preferred_projects[url]
     # Ignore unattached projects if requested
     if ignore_unattached:
+        ignored_projects = ignored_projects[:]
         for project in approved_project_urls:
             boincified_url = resolve_url_boinc_rpc(
                 project,
@@ -892,14 +923,14 @@ def generate_stats(
                 log.warning(
                     "Ignoring whitelisted project {} bc not attached".format(project)
                 )
-    combined_stats, unapproved_projects = add_mag_to_combined_stats(
-        combined_stats,
-        mag_ratios,
-        approved_project_urls,
-        list(preferred_projects.keys()),
-    )
 
     # Detect attached projects which are not whitelisted or in PREFERRED_PROJECTS
+    unapproved_projects = get_unapproved_list(
+        combined_stats.keys(),
+        mag_ratios,
+        approved_project_urls,
+        preferred_projects.keys(),
+    )
     if len(unapproved_projects) > 0:
         if not quiet:
             print(
@@ -910,68 +941,83 @@ def generate_stats(
             "Warning: Projects below were found in your BOINC config but are not on the gridcoin approval list or your preferred projects list. If you want them to be given weight, be sure to add them to your preferred projects"
             + str(unapproved_projects)
         )
+
     most_efficient_projects = get_most_mag_efficient_projects(
         combined_stats, ignored_projects, quiet=quiet, time_mode=TIME_MODE
     )
+    total_weight = 1000
+    total_preferred_weight = (
+        0 if is_dev else ((PREFERRED_PROJECTS_PERCENT / 100) * 1000)
+    )
+    total_mining_weight = 0
+
+    # Calculate project weights w/ credit/hr
+    project_weights = {}
+    # Assign weight of 1 to all projects which didn't make the cut
+    if not is_dev:
+        weak_stats = []
+        for project_url in approved_project_urls:
+            if project_url in ignored_projects:
+                continue
+            if project_url in preferred_projects:
+                continue  # Exclude preferred projects
+            if len(most_efficient_projects) == 0:
+                weak_stats.append(project_url)
+                continue
+            if benchmark_check(
+                project_url=project_url,
+                combined_stats=combined_stats,
+                benchmarking_minimum_wus=BENCHMARKING_MINIMUM_WUS,
+                benchmarking_minimum_time=BENCHMARKING_MINIMUM_TIME,
+                benchmarking_delay_in_days=BENCHMARKING_DELAY_IN_DAYS,
+                skip_benchmarking=SKIP_BENCHMARKING,
+            ):
+                weak_stats.append(project_url)
+                continue
+            if project_url not in most_efficient_projects:
+                if (
+                    ONLY_MINE_IF_PROFITABLE
+                    and (
+                        grc_per_hour := grc_revenue_estimate(
+                            project_url, combined_stats
+                        )
+                    )
+                    is not None
+                    and grc_per_hour <= min_grc_per_hour
+                ):
+                    project_weights.setdefault(project_url, 0)
+                else:
+                    weak_stats.append(project_url)
+                continue
+        for project_url in weak_stats:
+            project_weights[project_url] = 1
+            total_mining_weight += 1
+        if len(weak_stats) > 0:
+            if quiet:
+                log.debug(
+                    "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: "
+                    + str(weak_stats)
+                )
+            else:
+                print_and_log(
+                    "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: ",
+                    "INFO",
+                )
+                pprint.pprint(weak_stats)
+    # Figure out weight to assign to most efficient projects, assign it
     if len(most_efficient_projects) == 0:
+        per_efficient_project = 0
         print_and_log(
             "No projects have enough completed tasks to determine which is the most efficient. Assigning all projects 1",
             "WARNING",
         )
-        total_preferred_weight = (
-            1000 - (len(approved_project_urls)) + len(preferred_projects)
+    else:
+        total_mining_weight_remaining = (
+            total_weight - total_mining_weight - total_preferred_weight
         )
-        total_mining_weight = 0
-    else:
-        total_preferred_weight = (PREFERRED_PROJECTS_PERCENT / 100) * 1000
-        total_mining_weight = 1000 - total_preferred_weight
-    total_mining_weight_remaining = total_mining_weight
-    # Assign weight of 1 to all projects which didn't make the cut
-    for project_url in approved_project_urls:
-        preferred_extract = preferred_projects.get(project_url)
-        if preferred_extract:
-            continue  # Exclude preferred projects
-        if project_url in ignored_projects:
-            final_project_weights[project_url] = 0
-            dev_project_weights[project_url] = 0
-            continue
-        combined_stats_extract = combined_stats.get(project_url)
-        if not combined_stats_extract:
-            weak_stats.append(project_url)
-            continue
-        total_tasks = int(combined_stats_extract["COMPILED_STATS"]["TOTALTASKS"])
-        if total_tasks < 10:
-            weak_stats.append(project_url)
-            continue
-        if project_url not in most_efficient_projects or total_tasks < 10:
-            weak_stats.append(project_url)
-    # Assign weight of one to all project without enough stats
-    for project_url in weak_stats:
-        final_project_weights[project_url] = 1
-        total_mining_weight_remaining -= 1
-        dev_project_weights[project_url] = 0
-    if len(weak_stats) > 0:
-        if quiet:
-            log.debug(
-                "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: "
-                + str(weak_stats)
-            )
-        else:
-            print_and_log(
-                "The following projects do not have enough stats to be calculated accurately, assigning them a weight of one: ",
-                "INFO",
-            )
-            pprint.pprint(weak_stats)
-    # Figure out weight to assign to most efficient projects, assign it
-    if len(most_efficient_projects) == 0:
-        per_efficient_project = 0
-        per_efficient_project_dev = 0
-    else:
         per_efficient_project = total_mining_weight_remaining / len(
             most_efficient_projects
         )
-        per_efficient_project_dev = 1000 / len(most_efficient_projects)
-    if total_mining_weight_remaining > 0:
         if not quiet:
             print_and_log(
                 "Assigning "
@@ -984,27 +1030,19 @@ def generate_stats(
                 "INFO",
             )
     for project_url in most_efficient_projects:
-        if project_url not in final_project_weights:
-            final_project_weights[project_url] = 0
-            dev_project_weights[project_url] = 0
-        final_project_weights[project_url] += per_efficient_project
-        dev_project_weights[project_url] = per_efficient_project_dev
-    # Assign weight to preferred projects
-    for project_url, weight in preferred_projects.items():
-        final_project_weights_extract = final_project_weights.get(project_url)
-        preferred_project_weights_extract = preferred_projects.get(project_url, 0)
-        if not final_project_weights_extract:
-            final_project_weights[project_url] = 0
-        intended_weight = (
-            preferred_project_weights_extract / 100
-        ) * total_preferred_weight
-        final_project_weights[project_url] += intended_weight
+        project_weights.setdefault(project_url, 0)
+        project_weights[project_url] += per_efficient_project
+        total_mining_weight += per_efficient_project
+    if not is_dev:
+        total_preferred_weight = total_weight - total_mining_weight
+        # Assign weight to preferred projects
+        for project_url, weight in preferred_projects.items():
+            project_weights.setdefault(project_url, 0)
+            project_weights[project_url] += (weight / 100) * total_preferred_weight
     return (
-        combined_stats,
-        final_project_weights,
+        project_weights,
         total_preferred_weight,
         total_mining_weight,
-        dev_project_weights,
     )
 
 
@@ -2092,7 +2130,6 @@ async def boinc_loop(
     global STATE_CLIENT
     global STATE_DEV
     global COMBINED_STATS
-    global total_preferred_weight
     global priority_projects
     global priority_results
     global DEV_BOINC_PASSWORD
@@ -2163,6 +2200,38 @@ async def boinc_loop(
             else:
                 break
 
+        # If we haven't checked GRC prices in a while, do it
+        now = datetime.datetime.now()
+        price_last_check: datetime.datetime = DATABASE.get(
+            "GRCPRICELASTCHECKED", datetime.datetime.fromtimestamp(0)
+        )
+        price_check_delta = now - price_last_check
+        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
+            grc_price: float | None = get_grc_price()
+            DATABASE["GRCPRICELASTCHECKED"] = now
+            if grc_price is not None:
+                DATABASE["GRCPRICE"] = grc_price
+        grc_price = DATABASE.get("GRCPRICE", 0)
+        assert grc_price is not None, "GRC price should not be None here"
+
+        # If we haven't checked currency exchange rate in a while, do it
+        now = datetime.datetime.now()
+        price_last_check: datetime.datetime = DATABASE.get(
+            "CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE),
+            datetime.datetime.fromtimestamp(0),
+        )
+        price_check_delta = now - price_last_check
+        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
+            currency_rate: float | None = get_currency_rate(CURRENCY_CODE)
+            DATABASE["CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE)] = now
+            if currency_rate is not None:
+                DATABASE["CURRENCY_{}".format(CURRENCY_CODE)] = currency_rate
+        currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
+        assert currency_rate is not None, "Currency rate should not be None here"
+
+        log.info("Found grc price %f %s/GRC", grc_price * currency_rate, CURRENCY_CODE)
+        target_grc_price = max(grc_price * currency_rate, GRC_SELL_PRICE or 0)
+
         # If we haven't re-calculated stats or fetched mag recently enough, do it
         now = datetime.datetime.now()
         mag_last_check: datetime.datetime = DATABASE.get(
@@ -2214,19 +2283,34 @@ async def boinc_loop(
             #     config_dir_abs_path=BOINC_DATA_DIR, rolling_weight_window=ROLLING_WEIGHT_WINDOW
             # )
             # total_time = combined_stats_to_total_time(COMBINED_STATS)
-            (
-                COMBINED_STATS,
-                STATE_CLIENT.PROJECT_WEIGHTS,
-                total_preferred_weight,
-                total_mining_weight,
-                STATE_DEV.PROJECT_WEIGHTS,
-            ) = generate_stats(
+            COMBINED_STATS = add_mag_to_combined_stats(
+                config_files_to_stats(
+                    BOINC_DATA_DIR,
+                    rolling_weight_window=ROLLING_WEIGHT_WINDOW,
+                ),
+                mag_ratios=MAG_RATIOS,
+            )
+            (STATE_CLIENT.PROJECT_WEIGHTS, *_) = generate_weight(
+                combined_stats=COMBINED_STATS,
                 approved_project_urls=APPROVED_PROJECT_URLS,
                 preferred_projects=PREFERRED_PROJECTS,
                 ignored_projects=IGNORED_PROJECTS,
                 quiet=True,
                 ignore_unattached=True,
                 mag_ratios=MAG_RATIOS,
+                min_grc_per_hour=get_min_grc_per_hour(
+                    target_grc_price, EXCHANGE_FEE, MIN_PROFIT_PER_HOUR
+                ),
+            )
+            (STATE_DEV.PROJECT_WEIGHTS, *_) = generate_weight(
+                combined_stats=COMBINED_STATS,
+                approved_project_urls=APPROVED_PROJECT_URLS,
+                preferred_projects=PREFERRED_PROJECTS,
+                ignored_projects=IGNORED_PROJECTS,
+                quiet=True,
+                ignore_unattached=True,
+                mag_ratios=MAG_RATIOS,
+                is_dev=True,
             )
             if DUMP_PROJECT_WEIGHTS:
                 save_stats(
@@ -2252,6 +2336,12 @@ async def boinc_loop(
                         DUMP_DIR, "" if not dev_loop else "_DEV"
                     ),
                 )
+                save_stats(
+                    priority_results,
+                    "{}/PROJECT_PRIORITY_VALUE{}".format(
+                        DUMP_DIR, "" if not dev_loop else "_DEV"
+                    ),
+                )
             log.debug("Sorted projects by priority are: " + str(priority_projects))
             # Print some pretty stats
             update_table(dev_loop=dev_loop)
@@ -2267,37 +2357,6 @@ async def boinc_loop(
             )
         )
 
-        # If we haven't checked GRC prices in a while, do it
-        now = datetime.datetime.now()
-        price_last_check: datetime.datetime = DATABASE.get(
-            "GRCPRICELASTCHECKED", datetime.datetime.fromtimestamp(0)
-        )
-        price_check_delta = now - price_last_check
-        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
-            grc_price: float | None = get_grc_price()
-            DATABASE["GRCPRICELASTCHECKED"] = now
-            if grc_price is not None:
-                DATABASE["GRCPRICE"] = grc_price
-        grc_price = DATABASE.get("GRCPRICE", 0)
-        assert grc_price is not None, "GRC price should not be None here"
-
-        # If we haven't checked currency exchange rate in a while, do it
-        now = datetime.datetime.now()
-        price_last_check: datetime.datetime = DATABASE.get(
-            "CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE),
-            datetime.datetime.fromtimestamp(0),
-        )
-        price_check_delta = now - price_last_check
-        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
-            currency_rate: float | None = get_currency_rate(CURRENCY_CODE)
-            DATABASE["CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE)] = now
-            if currency_rate is not None:
-                DATABASE["CURRENCY_{}".format(CURRENCY_CODE)] = currency_rate
-        currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
-        assert currency_rate is not None, "Currency rate should not be None here"
-
-        log.info("Found grc price %f %s/GRC", grc_price * currency_rate, CURRENCY_CODE)
-
         # Check profitability of all projects, if none profitable
         # (and user doesn't want unprofitable crunching), sleep for 1hr
         profit_dump = {}
@@ -2307,9 +2366,8 @@ async def boinc_loop(
                 profit_dump.setdefault(
                     project,
                     profitability_estimate(
-                        grc_price=grc_price * currency_rate,
+                        grc_price=target_grc_price,
                         exchange_fee=EXCHANGE_FEE,
-                        grc_sell_price=GRC_SELL_PRICE,
                         project=project,
                         combined_stats=COMBINED_STATS,
                     ),
@@ -2326,11 +2384,14 @@ async def boinc_loop(
                     ),
                 )
             save_stats(
-                {
-                    project: profit if benchmark_dump.get(project, True) else None
-                    for project, profit in profit_dump.items()
-                },
+                profit_dump,
                 "{}/PROJECT_PROFIT{}".format(DUMP_DIR, "" if not dev_loop else "_DEV"),
+            )
+            save_stats(
+                benchmark_dump,
+                "{}/PROJECT_BENCHMARK{}".format(
+                    DUMP_DIR, "" if not dev_loop else "_DEV"
+                ),
             )
         if not dev_loop and ONLY_BOINC_IF_PROFITABLE:
             profit_total = 0.0
@@ -2343,9 +2404,8 @@ async def boinc_loop(
                             profit_dump[project]
                             if project in profit_dump
                             else profitability_estimate(
-                                grc_price=grc_price * currency_rate,
+                                grc_price=target_grc_price,
                                 exchange_fee=EXCHANGE_FEE,
-                                grc_sell_price=GRC_SELL_PRICE,
                                 project=project,
                                 combined_stats=COMBINED_STATS,
                             )
@@ -2527,9 +2587,8 @@ async def boinc_loop(
                     )
                 )
                 and not profitability_check(
-                    grc_price=grc_price * currency_rate,
+                    grc_price=target_grc_price,
                     exchange_fee=EXCHANGE_FEE,
-                    grc_sell_price=GRC_SELL_PRICE,
                     project=project,
                     min_profit_per_hour=MIN_PROFIT_PER_HOUR,
                     combined_stats=COMBINED_STATS,
@@ -2730,7 +2789,6 @@ def main():
     global BOINC_PROJECT_NAMES
     global MAG_RATIOS
     global CHECK_SIDESTAKE_RESULTS
-    global total_preferred_weight
     global project_resolver_dict
     global priority_results
     global override_path
@@ -2806,9 +2864,11 @@ def main():
         save_stats(DATABASE)
 
     if ENABLE_TARGET_TEMP_CONTROL:
-        TEMP_TARGET_CTL = PertubationController(TARGET_TEMP)
+        TEMP_TARGET_CTL = PertubationController()
+        TEMP_TARGET_CTL.target_opt = (TARGET_TEMP_MAX + TARGET_TEMP_MIN) / 2
         TEMP_TARGET_CTL.ctrl_min = MIN_CPU_TIME_PERCENT / 100
         TEMP_TARGET_CTL.ctrl_max = MAX_CPU_TIME_PERCENT / 100
+        TEMP_TARGET_CTL.min_error = (TARGET_TEMP_MAX - TARGET_TEMP_MIN) / 2
         TEMP_TARGET_CTL.ctrl = (TEMP_TARGET_CTL.ctrl_min + TEMP_TARGET_CTL.ctrl_max) / 2
         TEMP_TARGET_CTL.import_state(DATABASE.get("TEMP_TARGET_STATE", {}))
 
@@ -3132,6 +3192,38 @@ def main():
             if CHECK_SIDESTAKE_RESULTS:
                 DEV_FEE_MODE = "SIDESTAKE"
 
+        # If we haven't checked GRC prices in a while, do it
+        now = datetime.datetime.now()
+        price_last_check: datetime.datetime = DATABASE.get(
+            "GRCPRICELASTCHECKED", datetime.datetime.fromtimestamp(0)
+        )
+        price_check_delta = now - price_last_check
+        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
+            grc_price: float | None = get_grc_price()
+            DATABASE["GRCPRICELASTCHECKED"] = now
+            if grc_price is not None:
+                DATABASE["GRCPRICE"] = grc_price
+        grc_price = DATABASE.get("GRCPRICE", 0)
+        assert grc_price is not None, "GRC price should not be None here"
+
+        # If we haven't checked currency exchange rate in a while, do it
+        now = datetime.datetime.now()
+        price_last_check: datetime.datetime = DATABASE.get(
+            "CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE),
+            datetime.datetime.fromtimestamp(0),
+        )
+        price_check_delta = now - price_last_check
+        if abs(price_check_delta.total_seconds() / 60) > max(PRICE_CHECK_INTERVAL, 60):
+            currency_rate: float | None = get_currency_rate(CURRENCY_CODE)
+            DATABASE["CURRENCYLASTCHECKED_{}".format(CURRENCY_CODE)] = now
+            if currency_rate is not None:
+                DATABASE["CURRENCY_{}".format(CURRENCY_CODE)] = currency_rate
+        currency_rate = DATABASE.get("CURRENCY_{}".format(CURRENCY_CODE), 1)
+        assert currency_rate is not None, "Currency rate should not be None here"
+
+        log.info("Found grc price %f %s/GRC", grc_price * currency_rate, CURRENCY_CODE)
+        target_grc_price = max(grc_price * currency_rate, GRC_SELL_PRICE or 0)
+
         # Get project list from BOINC
         try:
             ALL_PROJECT_URLS = boinc_client.get_project_list()
@@ -3140,18 +3232,36 @@ def main():
                 "Error getting project URL list from BOINC " + str(e), "ERROR"
             )
 
+        COMBINED_STATS = add_mag_to_combined_stats(
+            config_files_to_stats(
+                BOINC_DATA_DIR,
+                rolling_weight_window=ROLLING_WEIGHT_WINDOW,
+            ),
+            mag_ratios=MAG_RATIOS,
+        )
         (
-            COMBINED_STATS,
             STATE_CLIENT.PROJECT_WEIGHTS,
             total_preferred_weight,
             total_mining_weight,
-            STATE_DEV.PROJECT_WEIGHTS,
-        ) = generate_stats(
+        ) = generate_weight(
+            combined_stats=COMBINED_STATS,
             approved_project_urls=APPROVED_PROJECT_URLS,
             preferred_projects=PREFERRED_PROJECTS,
             ignored_projects=IGNORED_PROJECTS,
-            quiet=False,
+            quiet=True,
             mag_ratios=MAG_RATIOS,
+            min_grc_per_hour=get_min_grc_per_hour(
+                target_grc_price, EXCHANGE_FEE, MIN_PROFIT_PER_HOUR
+            ),
+        )
+        (STATE_DEV.PROJECT_WEIGHTS, *_) = generate_weight(
+            combined_stats=COMBINED_STATS,
+            approved_project_urls=APPROVED_PROJECT_URLS,
+            preferred_projects=PREFERRED_PROJECTS,
+            ignored_projects=IGNORED_PROJECTS,
+            quiet=True,
+            mag_ratios=MAG_RATIOS,
+            is_dev=True,
         )
         log.debug("Printing pretty stats...")
         # Calculate starting efficiency stats

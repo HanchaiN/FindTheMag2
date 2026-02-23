@@ -56,7 +56,8 @@ STOP_TEMP = 75  # Stop crunching is temp > this number, whole numbers only! Defa
 
 ENABLE_TARGET_TEMP_CONTROL = False  # Enable target temp control mode. Default: False
 ENABLE_TARGET_TEMP_CONTROL_GPU = False  # Enable target temp control mode to pause GPU. Default: False
-TARGET_TEMP = 70
+TARGET_TEMP_MIN = 65
+TARGET_TEMP_MAX = 75
 MIN_CPU_TIME_PERCENT: float = 20  # Minimum CPU time percent in target temp mode
 MAX_CPU_TIME_PERCENT: float = 100  # Maximum CPU time percent in target temp mode
 
