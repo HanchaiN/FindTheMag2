@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import datetime
 import functools
 import logging
-from math import ceil, floor
 import signal
-import datetime
+from math import ceil, floor
 from typing import Any, Collection, Dict, Generic, Iterable, List, TypeVar, Union
 
 A = TypeVar("A")
@@ -270,24 +270,30 @@ def json_default(obj) -> Dict[str, str]:
 
 # Logging and printing
 def print_and_log(
-    msg: str,
     log_level: str,
+    msg: str,
+    *args,
     log: Union[logging.Logger, None] = None,
+    quiet: bool = False,
 ) -> None:
     """
     Print a message and add it to the log at LOG_LEVEL. Valid log_levels are DEBUG, INFO, WARNING, ERROR
     """
     if log is None:
         log = logging.getLogger()
-    print(msg)
+    if not quiet:
+        if args:
+            msg = msg % args
+            args = tuple()
+        print(msg)
     if log_level == "DEBUG":
-        log.debug(msg)
+        log.debug(msg, *args)
     elif log_level == "INFO":
-        log.info(msg)
+        log.info(msg, *args)
     elif log_level == "WARNING":
-        log.warning(msg)
+        log.warning(msg, *args)
     elif log_level == "ERROR":
-        log.error(msg)
+        log.error(msg, *args)
     else:
         log.error("Being asked to log at an unknown level: %s", log_level)
         log.info("Unknown message: %s", msg)

@@ -17,10 +17,10 @@ print_and_log = functools.partial(_print_and_log, log=log)
 async def set_temp_control(
     boinc_rpc_client: RPCClient,
     override_path: str,
-    cpu_time_frac: float = 1,
+    controller: PertubationController,
     min_delta: float = 0.0,
 ):
-    cpu_time_percent = max(1.0, min(100.0, cpu_time_frac * 100.0))
+    cpu_time_percent = max(1.0, min(100.0, controller.ctrl * 100.0))
     cpu_time_percent_str = "{:.02f}".format(cpu_time_percent)
     # Update settings to match user settings from main BOINC install
     if os.path.exists(override_path):

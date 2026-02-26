@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from typing import Union, Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import requests
 from bs4 import BeautifulSoup
@@ -18,12 +18,19 @@ AGENTS = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.2592.113"
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 12_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36"
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36",
 )
 
-GRC_PRICE_URLS = ("https://www.bybit.com/en/coin-price/gridcoin-research/", "https://coinstats.app/coins/gridcoin/", "https://marketcapof.com/crypto/gridcoin-research/")
+GRC_PRICE_URLS = (
+    "https://www.bybit.com/en/coin-price/gridcoin-research/",
+    "https://coinstats.app/coins/gridcoin/",
+    "https://marketcapof.com/crypto/gridcoin-research/",
+)
 
-def parse_grc_price_soup(url: str, price_soup: str) -> Tuple[Union[float, None], str, str]:
+
+def parse_grc_price_soup(
+    url: str, price_soup: str
+) -> Tuple[Union[float, None], str, str]:
     float_price = None
     info_message = ""
     url_message = ""
@@ -75,7 +82,9 @@ def parse_grc_price_soup(url: str, price_soup: str) -> Tuple[Union[float, None],
     return float_price, url_message, info_message
 
 
-def get_grc_price_from_sites(proxies: Union[Dict[str, str], None] = None) -> Tuple[Union[float, None], str, List[str], List[str], List[str]]:
+def get_grc_price_from_sites(
+    proxies: Union[Dict[str, str], None] = None,
+) -> Tuple[Union[float, None], str, List[str], List[str], List[str]]:
     headers = requests.utils.default_headers()
     headers["User-Agent"] = random.choice(AGENTS)
     found_prices = []
@@ -100,7 +109,19 @@ def get_grc_price_from_sites(proxies: Union[Dict[str, str], None] = None) -> Tup
 
     if len(found_prices) > 0:
         table_message = f"Found GRC price {sum(found_prices) / len(found_prices)}"
-        return sum(found_prices) / len(found_prices), table_message, url_messages, info_logger_messages, error_logger_messages
+        return (
+            sum(found_prices) / len(found_prices),
+            table_message,
+            url_messages,
+            info_logger_messages,
+            error_logger_messages,
+        )
 
     table_message = "Unable to find GRC price"
-    return None, table_message, url_messages, info_logger_messages, error_logger_messages
+    return (
+        None,
+        table_message,
+        url_messages,
+        info_logger_messages,
+        error_logger_messages,
+    )

@@ -5,10 +5,10 @@ description = "A tool to determine optimal projects for Gridcoin & BOINC crunche
 authors = ["makeasnek"]
 license = "AGPL-3.0"
 readme = "README.md"
-packages = [{include = "findthemag2_3"}]
+packages = [{ include = "findthemag2_3" }]
 
 [tool.poetry.dependencies]
-python = "^3.8"
+python = "^3.10"
 certifi = "^2024.8.30"
 charset-normalizer = "^3.4.0"
 datetime = "^5.5"
@@ -26,8 +26,18 @@ xmltodict = "^0.14.2"
 zope-interface = "^7.2"
 nest-asyncio = "^1.6.0"
 beautifulsoup4 = "^4.13.3"
+systemd-python = "^235"
 
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.isort]
+profile = "black"
+
+[dependency-groups]
+dev = [
+    "black (>=26.1.0,<27.0.0)",
+    "isort (>=8.0.0,<9.0.0)"
+]

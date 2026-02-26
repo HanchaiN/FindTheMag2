@@ -1,24 +1,24 @@
 from __future__ import annotations
+
 import functools
+import json
 import logging
-
-from utils.utils import (
-    grc_project_name_to_url,
-    json_default,
-    print_and_log,
-    resolve_url_database,
-)
-
+import os
+from time import sleep
+from typing import Callable, Dict, List, Mapping, Union
 
 import requests
 from requests.auth import HTTPBasicAuth
 
-
-import json
-from time import sleep
-from typing import Callable, List, Mapping, Union, Dict
-import os
+from utils.utils import (
+    grc_project_name_to_url,
+    json_default,
+)
+from utils.utils import print_and_log
 from utils.utils import print_and_log as _print_and_log
+from utils.utils import (
+    resolve_url_database,
+)
 
 log = logging.getLogger()
 print_and_log = functools.partial(_print_and_log, log=log)
@@ -218,12 +218,9 @@ def get_gridcoin_config_parameters(gridcoin_dir: str) -> Dict[str, str]:
     for key, value in dupes.items():
         if len(value) > 1:
             print_and_log(
-                "Warning: multiple values found for "
-                + key
-                + " in gridcoin config file at "
-                + os.path.join(gridcoin_dir, "gridcoinresearch.conf")
-                + " using the first one we found",
                 "WARNING",
+                "Warning: multiple values found for %s in gridcoin config file at %s using the first one we found"
+                % (key, os.path.join(gridcoin_dir, "gridcoinresearch.conf")),
             )
 
     return return_dict
@@ -317,15 +314,15 @@ class ProjectMagRatio:
         except Exception as e:
             if len(cls.PROJECT_MAG_RATIOS_CACHE) > 0:
                 print_and_log(
-                    "Error communicating with Gridcoin wallet {}, using cached data!".format(
-                        e
-                    ),
                     "ERROR",
+                    "Error communicating with Gridcoin wallet %s, using cached data!"
+                    % (e),
                 )
                 return cls.PROJECT_MAG_RATIOS_CACHE
             else:
                 print_and_log(
-                    "Error communicating with Gridcoin wallet! {}".format(e), "ERROR"
+                    "ERROR",
+                    "Error communicating with Gridcoin wallet! %s" % e,
                 )
                 return None
 
@@ -341,8 +338,9 @@ class ProjectMagRatio:
         :param lookback_period: number of superblocks to look back to determine average
         :return: Dictionary w/ key as project URL and value as project mag ratio (mag per unit of RAC)
         """
-        import requests as req
         import json
+
+        import requests as req
 
         url = "https://www.gridcoinstats.eu/API/simpleQuery.php?q=superblocks"
         try:
@@ -351,14 +349,14 @@ class ProjectMagRatio:
             print("Error retrieving project mag ratios from gridcoinstats.eu")
             if len(cls.PROJECT_MAG_RATIOS_CACHE) > 0:
                 print_and_log(
-                    "Error communicating with gridcoinstats for magnitude info, using cached data",
                     "ERROR",
+                    "Error communicating with gridcoinstats for magnitude info, using cached data",
                 )
                 return cls.PROJECT_MAG_RATIOS_CACHE
             else:
                 print_and_log(
-                    "Error communicating with gridcoinstats for magnitude info, no cached data available",
                     "ERROR",
+                    "Error communicating with gridcoinstats for magnitude info, no cached data available",
                 )
             return None
         try:
@@ -377,8 +375,8 @@ class ProjectMagRatio:
             log.error("E in get_project_mag_ratios_from_url:{}".format(e))
             if len(cls.PROJECT_MAG_RATIOS_CACHE) > 0:
                 print_and_log(
-                    "Error communicating with gridcoinstats for magnitude info, using cached data",
                     "ERROR",
+                    "Error communicating with gridcoinstats for magnitude info, using cached data",
                 )
                 return cls.PROJECT_MAG_RATIOS_CACHE
             return None

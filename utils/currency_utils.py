@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import random
-from typing import Union, Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import requests
 
@@ -20,7 +20,9 @@ AGENTS = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0 Safari/537.36",
 )
 
-CURRENCY_URLS = ("https://currencyrateapi.com/api/latest?codes={code}&base_currency=USD",)
+CURRENCY_URLS = (
+    "https://currencyrateapi.com/api/latest?codes={code}&base_currency=USD",
+)
 
 
 def parse_currency_soup(
@@ -46,8 +48,7 @@ def parse_currency_soup(
 
 
 def get_currency_from_sites(
-    currency_code: str,
-    proxies: Union[Dict[str, str]] = None
+    currency_code: str, proxies: Union[Dict[str, str]] = None
 ) -> Tuple[Union[float, None], str, List[str], List[str], List[str]]:
     if currency_code == "USD":
         return (
